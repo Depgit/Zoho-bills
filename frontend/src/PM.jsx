@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, errMsg } from './api.js';
 
-const blank = { name: '', quantity: 1, rate: 0, account_id: '', tax_id: '' };
+const blank = { name: '', description: '', quantity: 1, rate: '', account_id: '', tax_percentage: 0, tax_id: '' };
 
 function Sel({ v, on, opts, id, label, className = '' }) {
   return (
@@ -43,16 +43,27 @@ export default function PM() {
   const [q, setQ] = useState('');
   const [extracting, setExtracting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // vendor → default account_id map (backed by DB)
+  const [vendorAccountMap, setVendorAccountMap] = useState({});
+  // editingId: set when editing an existing bill (PENDING_L1 / rejected)
+  const [editingId, setEditingId] = useState(null);
 
   const loadMine = () => api.get('/bills').then(r => setMine(r.data));
+
+  // Load all contacts once on mount (full list, no search filter)
+  const loadContacts = () =>
+    api.get('/zoho/contacts').then(r => setC(r.data)).catch(() => { });
 
   useEffect(() => {
     api.get('/zoho/accounts').then(r => setA(r.data)).catch(e => setMsg(errMsg(e)));
     api.get('/zoho/taxes').then(r => setT(r.data)).catch(e => setMsg(errMsg(e)));
+    api.get('/bills/vendor-account-map').then(r => setVendorAccountMap(r.data || {})).catch(() => { });
+    loadContacts();
     loadMine();
   }, []);
 
-  const searchVendors = async s => {
+  // Refresh vendor list (called from Search button or on demand)
+  const searchVendors = async () => {
     try {
       const r = await api.get('/zoho/contacts');
       setC(r.data);
@@ -61,6 +72,52 @@ export default function PM() {
       setMsg(errMsg(e));
       return [];
     }
+  };
+
+  // Find the best-matching contact for the extracted invoice.
+  // Priority: exact GSTIN match → partial GSTIN match → fuzzy name match.
+  const matchVendor = (list, gstin, vendorName) => {
+    const normGstin = (v) => (v || '').toUpperCase().replace(/\s/g, '');
+    const extracted = normGstin(gstin);
+
+    // 1) Exact GSTIN match
+    if (extracted) {
+      const exact = list.find(c => normGstin(c.gst_no) === extracted);
+      if (exact) return exact;
+
+      // 2) Partial GSTIN match (last 10 chars = PAN + suffix, first 2 = state code)
+      const partial = list.find(c => {
+        const cg = normGstin(c.gst_no);
+        return cg.length === 15 && extracted.length === 15 && cg.slice(2, 12) === extracted.slice(2, 12);
+      });
+      if (partial) return partial;
+    }
+
+    // 3) Fuzzy vendor name match (case-insensitive, ignores Pvt/Ltd etc.)
+    if (vendorName) {
+      const core = vendorName.toLowerCase().replace(/pvt|ltd|private|limited|llp|\./g, '').trim();
+      const nameFuzzy = list.find(c => {
+        const cn = c.contact_name.toLowerCase().replace(/pvt|ltd|private|limited|llp|\./g, '').trim();
+        return cn.includes(core) || core.includes(cn);
+      });
+      if (nameFuzzy) return nameFuzzy;
+    }
+
+    return null;
+  };
+
+  // Save vendor → account mapping to DB
+  const saveVendorAccount = async (vendorId, account_id) => {
+    if (!vendorId || !account_id) return;
+    setVendorAccountMap(prev => ({ ...prev, [vendorId]: account_id }));
+    api.post('/bills/vendor-account-map', { vendorId, account_id }).catch(() => { });
+  };
+
+  // When vendor changes, apply remembered account_id to line items that have none set
+  const applyVendorMemory = (vendorId, items) => {
+    const remembered = vendorAccountMap[vendorId];
+    if (!remembered) return items;
+    return items.map(l => ({ ...l, account_id: l.account_id || remembered }));
   };
 
   const upload = async e => {
@@ -75,21 +132,58 @@ export default function PM() {
     try {
       const { data } = await api.post('/bills/extract', fd);
       const x = data.extracted || {};
-      setQ(x.vendor_name || '');
-      const list = await searchVendors(x.vendor_name || '').catch(() => []);
-      const match = list.find(c => c.gst_no && c.gst_no === x.gstin);
+
+      // Use already-loaded contacts; refresh only if empty
+      const list = contacts.length ? contacts : await searchVendors().catch(() => []);
+      const matched = matchVendor(list, x.gstin, x.vendor_name);
+      const vendorId = matched?.contact_id || '';
+
+      if (matched) {
+        x.vendor_name = matched.contact_name;
+        setQ(matched.contact_name);
+      } else {
+        setQ(''); // Clear the search box so the dropdown isn't empty due to garbage OCR text
+      }
+
+
+      // Show a hint if we found a match by GSTIN
+      const matchHint = matched
+        ? (matched.gst_no && (matched.gst_no.toUpperCase() === (x.gstin || '').toUpperCase())
+          ? `✓ Vendor auto-matched by GSTIN: ${matched.contact_name}`
+          : `✓ Vendor matched by name: ${matched.contact_name}`)
+        : '';
+
+      const defaultTaxPct = (x.tax_percent !== undefined && x.tax_percent !== null && !isNaN(Number(x.tax_percent)))
+        ? Number(x.tax_percent)
+        : 0;
+
+      const rawItems = (x.line_items?.length ? x.line_items : [blank]).map(l => ({
+        ...blank,
+        ...l,
+        rate: l.rate || '',   // keep blank if AI returned 0 so PM must fill it
+        tax_percentage: (l.tax_percentage !== undefined && l.tax_percentage !== null && !isNaN(Number(l.tax_percentage)))
+          ? Number(l.tax_percentage)
+          : ((l.tax_percent !== undefined && l.tax_percent !== null && !isNaN(Number(l.tax_percent)))
+            ? Number(l.tax_percent)
+            : defaultTaxPct),
+        tax_id: '',
+      }));
+      const items = vendorId ? applyVendorMemory(vendorId, rawItems) : rawItems;
 
       setF({
         pdfFile: data.pdfFile,
         fileType: data.fileType || file.type || 'application/pdf',
         extracted: x,
-        vendorId: match?.contact_id || '',
+        vendorId,
         billNumber: x.invoice_no || '',
         date: x.date || '',
         dueDate: '',
-        lineItems: (x.line_items?.length ? x.line_items : [blank]).map(l => ({ ...blank, ...l }))
+        discount_amount: x.discount_amount || 0,
+        discount_percent: x.discount_percent || 0,
+        lineItems: items,
       });
-      setMsg(data.warning ? `Note: ${data.warning}` : '');
+      setEditingId(null);
+      setMsg(data.warning ? `Note: ${data.warning}` : matchHint);
     } catch (er) {
       setMsg(errMsg(er));
     } finally {
@@ -97,28 +191,105 @@ export default function PM() {
     }
   };
 
-  const set = (k, v) => setF({ ...f, [k]: v });
-  const setLine = (i, k, v) => set('lineItems', f.lineItems.map((l, j) => j === i ? { ...l, [k]: v } : l));
-  const taxPct = id => taxes.find(t => t.tax_id === id)?.tax_percentage || 0;
-  const total = f?.lineItems.reduce((s, l) => s + (Number(l.rate) || 0) * (Number(l.quantity) || 1) * (1 + taxPct(l.tax_id) / 100), 0) || 0;
+  const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
+
+  const setLine = (i, k, v) => {
+    const updated = f.lineItems.map((l, j) => j === i ? { ...l, [k]: v } : l);
+    setF(prev => ({ ...prev, lineItems: updated }));
+    // When account_id changes and we have a vendor, persist the mapping
+    if (k === 'account_id' && f.vendorId && v) {
+      saveVendorAccount(f.vendorId, v);
+    }
+  };
+
+  // When vendor selection changes, apply the remembered account
+  const setVendor = v => {
+    const items = applyVendorMemory(v, f.lineItems);
+    setF(prev => ({ ...prev, vendorId: v, lineItems: items }));
+  };
+
+  const standardRates = [0, 5, 12, 18, 28];
+  const zohoRates = taxes.map(t => Number(t.tax_percentage)).filter(p => !isNaN(p));
+  const extractedRate = (f?.extracted?.tax_percent !== undefined && f?.extracted?.tax_percent !== null && !isNaN(Number(f.extracted.tax_percent)))
+    ? [Number(f.extracted.tax_percent)]
+    : [];
+  const taxRateOptions = Array.from(new Set([...standardRates, ...zohoRates, ...extractedRate])).sort((a, b) => a - b);
+
+  // Subtotal before discount (no tax yet)
+  const subtotal = f?.lineItems.reduce((s, l) =>
+    s + (Number(l.rate) || 0) * (Number(l.quantity) || 1), 0) || 0;
+
+  // Discount value: prefer flat amount, else compute from percent
+  const discountVal = f
+    ? (Number(f.discount_amount) > 0
+      ? Number(f.discount_amount)
+      : (Number(f.discount_percent) > 0 ? subtotal * Number(f.discount_percent) / 100 : 0))
+    : 0;
+
+  // Total with tax applied then discount deducted
+  const total = (f?.lineItems.reduce((s, l) => {
+    const lineSubtotal = (Number(l.rate) || 0) * (Number(l.quantity) || 1);
+    const pct = Number(l.tax_percentage) || 0;
+    return s + lineSubtotal * (1 + pct / 100);
+  }, 0) || 0) - discountVal;
 
   const submit = async () => {
     if (!f.vendorId || !f.billNumber || !f.date) {
       setMsg('Please ensure Vendor, Bill Number, and Date are all specified.');
       return;
     }
+    const badRate = f.lineItems.findIndex(l => !(Number(l.rate) > 0));
+    if (badRate >= 0) {
+      setMsg(`Line item ${badRate + 1}: Rate (₹) must be greater than 0. Please fill it in.`);
+      return;
+    }
     setSubmitting(true);
     const vendorName = contacts.find(c => c.contact_id === f.vendorId)?.contact_name;
     try {
-      await api.post('/bills', { ...f, vendorName });
+      if (editingId) {
+        await api.put(`/bills/${editingId}`, { ...f, vendorName });
+        setMsg('Bill updated successfully.');
+      } else {
+        await api.post('/bills', { ...f, vendorName });
+        setMsg('Invoice successfully submitted for L1 approval!');
+      }
       setF(null);
-      setMsg('Invoice successfully submitted for L1 approval!');
+      setEditingId(null);
       loadMine();
     } catch (e) {
       setMsg(errMsg(e));
     } finally {
       setSubmitting(false);
     }
+  };
+
+  // Load an existing bill into the edit form
+  const editBill = async (b) => {
+    if (!['PENDING_L1', 'REJECTED_L1', 'REJECTED_FINANCE'].includes(b.status)) return;
+    setMsg('');
+    // Ensure contacts are loaded
+    const list = contacts.length ? contacts : await searchVendors('').catch(() => []);
+    setQ(list.find(c => c.contact_id === b.vendorId)?.contact_name || b.vendorName || '');
+    setEditingId(b._id);
+    setF({
+      pdfFile: b.pdfFile || '',
+      fileType: b.fileType || 'application/pdf',
+      extracted: b.extracted || {},
+      vendorId: b.vendorId || '',
+      billNumber: b.billNumber || '',
+      date: b.date || '',
+      dueDate: b.dueDate || '',
+      discount_amount: b.discount_amount || 0,
+      discount_percent: b.discount_percent || 0,
+      lineItems: (b.lineItems?.length ? b.lineItems : [blank]).map(l => ({
+        ...blank,
+        ...l,
+        tax_percentage: l.tax_percentage !== undefined && l.tax_percentage !== null
+          ? Number(l.tax_percentage)
+          : (taxes.find(t => t.tax_id === l.tax_id)?.tax_percentage || 0)
+      })),
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const parsedExtractedTotal = parseFloat(String(f?.extracted?.total || '').replace(/[^0-9.]/g, '')) || 0;
@@ -201,7 +372,7 @@ export default function PM() {
                 <polyline points="9 11 12 14 22 4"></polyline>
                 <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
               </svg>
-              Verify & Complete Bill Details
+              Verify &amp; Complete Bill Details
             </div>
             <button className="btn btn-secondary btn-sm" onClick={() => setF(null)}>
               Cancel
@@ -223,38 +394,132 @@ export default function PM() {
                 <span className="extracted-item-label">OCR Invoice Total:</span>
                 <span className="extracted-badge-total">{f.extracted.total || '0.00'}</span>
               </div>
+              {(f.extracted.tax_percent !== undefined && f.extracted.tax_percent !== null) ? (
+                <div className="extracted-item">
+                  <span className="extracted-item-label">Tax Rate:</span>
+                  <span className="extracted-item-val" style={{ fontFamily: 'monospace', color: 'var(--primary)' }}>
+                    {f.extracted.tax_percent}%
+                  </span>
+                </div>
+              ) : null}
+              {(f.extracted.discount_amount > 0 || f.extracted.discount_percent > 0) && (
+                <div className="extracted-item">
+                  <span className="extracted-item-label">OCR Discount:</span>
+                  <span className="extracted-item-val" style={{ color: 'var(--warning, #f59e0b)' }}>
+                    {f.extracted.discount_amount > 0
+                      ? `₹${f.extracted.discount_amount}`
+                      : `${f.extracted.discount_percent}%`}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
           {/* Vendor Search & Selection */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem', marginBottom: '1.25rem' }}>
             <div className="form-field">
+              <label className="form-label">GSTIN Search & Match</label>
+              <input
+                className="form-control"
+                placeholder="Type or select GSTIN..."
+                value={f.extracted.gstin || ''}
+                onChange={e => {
+                  const newGstin = e.target.value.toUpperCase().replace(/\s/g, '');
+                  setF(prev => ({ ...prev, extracted: { ...prev.extracted, gstin: newGstin } }));
+                  const matched = matchVendor(contacts, newGstin, f.extracted.vendor_name);
+                  if (matched) {
+                    setQ(matched.contact_name);
+                    setVendor(matched.contact_id);
+                  }
+                }}
+              />
+              {f.extracted.gstins?.length > 0 && (
+                <div style={{ marginTop: '0.5rem', display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                  {f.extracted.gstins.map(g => (
+                    <button
+                      key={g}
+                      type="button"
+                      style={{
+                        fontSize: '0.75rem', padding: '0.2rem 0.5rem',
+                        background: f.extracted.gstin === g ? 'var(--primary)' : 'var(--color-surface-subtle)',
+                        color: f.extracted.gstin === g ? '#fff' : 'var(--text-main)',
+                        border: '1px solid var(--color-border)', borderRadius: '4px', cursor: 'pointer'
+                      }}
+                      onClick={() => {
+                        setF(prev => ({ ...prev, extracted: { ...prev.extracted, gstin: g } }));
+                        const matched = matchVendor(contacts, g, f.extracted.vendor_name);
+                        if (matched) {
+                          setQ(matched.contact_name);
+                          setVendor(matched.contact_id);
+                        }
+                      }}
+                    >
+                      {g}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
+                {f.extracted.gstins?.length > 1 ? `Found ${f.extracted.gstins.length} GSTINs in document. Click one above or type manually.` : 'Enter GSTIN to auto-match vendor.'}
+              </p>
+            </div>
+
+            <div className="form-field">
               <label className="form-label">Search Zoho Vendor</label>
               <div className="search-input-group">
                 <input
                   className="form-control"
-                  placeholder="Type vendor name..."
+                  placeholder="Filter contacts by name..."
                   value={q}
-                  onChange={e => setQ(e.target.value)}
+                  onChange={e => {
+                    setQ(e.target.value);
+                    // Live-filter the already-loaded contacts client-side
+                  }}
                 />
-                <button type="button" className="btn btn-secondary" onClick={() => searchVendors(q)}>
-                  Search
+                <button type="button" className="btn btn-secondary" onClick={searchVendors}>
+                  Refresh
                 </button>
               </div>
+              {q && (
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
+                  Showing {contacts.filter(c => c.contact_name.toLowerCase().includes(q.toLowerCase())).length} matching contacts
+                </p>
+              )}
             </div>
 
             <div className="form-field">
               <label className="form-label">Select Vendor Contact *</label>
               <Sel
                 v={f.vendorId}
-                on={v => set('vendorId', v)}
+                on={setVendor}
                 id="contact_id"
                 label="Select Zoho Contact"
-                opts={contacts.map(c => ({
-                  ...c,
-                  label: `${c.contact_name} ${c.gst_no ? '· GST: ' + c.gst_no : ''}`
-                }))}
+                opts={
+                  (q
+                    ? contacts.filter(c => (c.contact_name || '').toLowerCase().includes(q.toLowerCase()))
+                    : contacts
+                  ).map(c => ({
+                    ...c,
+                    label: `${c.contact_name}${c.gst_no ? ' · ' + c.gst_no : ''}${vendorAccountMap[c.contact_id] ? ' ✓' : ''}`
+                  }))
+                }
               />
+              {f.vendorId && (() => {
+                const matched = contacts.find(c => c.contact_id === f.vendorId);
+                const byGstin = matched?.gst_no &&
+                  matched.gst_no.toUpperCase().replace(/\s/g, '') === (f.extracted?.gstin || '').toUpperCase().replace(/\s/g, '');
+                return matched ? (
+                  <p style={{
+                    fontSize: '0.75rem', marginTop: '0.3rem',
+                    color: byGstin ? 'var(--success, #22c55e)' : 'var(--primary, #6366f1)'
+                  }}>
+                    {byGstin
+                      ? `✓ Auto-matched by GSTIN: ${matched.contact_name}`
+                      : `✓ Selected: ${matched.contact_name}${matched.gst_no ? ' (GST: ' + matched.gst_no + ')' : ''}`}
+                    {vendorAccountMap[f.vendorId] ? ' · Default account applied' : ''}
+                  </p>
+                ) : null;
+              })()}
             </div>
           </div>
 
@@ -292,7 +557,7 @@ export default function PM() {
           {/* Line Items Editor */}
           <div className="form-field" style={{ marginTop: '0.5rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-              <label className="form-label" style={{ fontSize: '0.875rem' }}>Bill Line Items & Tax Breakdown</label>
+              <label className="form-label" style={{ fontSize: '0.875rem' }}>Bill Line Items &amp; Tax Breakdown</label>
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
@@ -303,20 +568,27 @@ export default function PM() {
             </div>
 
             <div className="line-items-container">
-              <div className="line-item-header">
+              <div className="line-item-header" style={{ gridTemplateColumns: '1.4fr 1.2fr 0.6fr 0.8fr 1.3fr 1fr 36px' }}>
                 <div>Description</div>
-                <div>Quantity</div>
+                <div>Item Name</div>
+                <div>Qty</div>
                 <div>Rate (₹)</div>
                 <div>Expense Account</div>
-                <div>Tax Slab</div>
+                <div>Tax %</div>
                 <div></div>
               </div>
 
               {f.lineItems.map((l, i) => (
-                <div key={i} className="line-item-row">
+                <div key={i} className="line-item-row" style={{ gridTemplateColumns: '1.4fr 1.2fr 0.6fr 0.8fr 1.3fr 1fr 36px' }}>
                   <input
                     className="form-control"
-                    placeholder="Item / service description"
+                    placeholder="Detailed description"
+                    value={l.description || ''}
+                    onChange={e => setLine(i, 'description', e.target.value)}
+                  />
+                  <input
+                    className="form-control"
+                    placeholder="Item / service name"
                     value={l.name}
                     onChange={e => setLine(i, 'name', e.target.value)}
                   />
@@ -332,8 +604,10 @@ export default function PM() {
                     step="0.01"
                     min="0"
                     className="form-control"
-                    value={l.rate}
-                    onChange={e => setLine(i, 'rate', +e.target.value)}
+                    style={!(Number(l.rate) > 0) ? { borderColor: '#ef4444' } : {}}
+                    placeholder="Rate ₹ *"
+                    value={l.rate === '' ? '' : l.rate}
+                    onChange={e => setLine(i, 'rate', e.target.value === '' ? '' : +e.target.value)}
                   />
                   <Sel
                     v={l.account_id}
@@ -342,13 +616,17 @@ export default function PM() {
                     label="Account"
                     opts={accounts.map(a => ({ ...a, label: a.account_name }))}
                   />
-                  <Sel
-                    v={l.tax_id}
-                    on={v => setLine(i, 'tax_id', v)}
-                    id="tax_id"
-                    label="Tax"
-                    opts={taxes.map(t => ({ ...t, label: `${t.tax_name} (${t.tax_percentage}%)` }))}
-                  />
+                  <select
+                    className="form-control"
+                    value={l.tax_percentage !== undefined && l.tax_percentage !== null ? l.tax_percentage : 0}
+                    onChange={e => setLine(i, 'tax_percentage', Number(e.target.value))}
+                  >
+                    {taxRateOptions.map(r => (
+                      <option key={r} value={r}>
+                        {r}%
+                      </option>
+                    ))}
+                  </select>
                   <button
                     type="button"
                     className="btn-icon-danger"
@@ -363,13 +641,71 @@ export default function PM() {
                 </div>
               ))}
             </div>
+
+            {/* Discount row */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap',
+              marginTop: '0.75rem', padding: '0.75rem 1rem',
+              background: 'var(--color-surface-subtle, rgba(99,102,241,0.05))',
+              borderRadius: 'var(--radius-md)', border: '1px dashed var(--color-border)'
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)', flexShrink: 0 }}>
+                <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
+                <line x1="7" y1="7" x2="7.01" y2="7"></line>
+              </svg>
+              <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                Discount on bill:
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>₹</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="form-control"
+                  style={{ maxWidth: 130 }}
+                  placeholder="Flat amount"
+                  value={f.discount_amount || ''}
+                  onChange={e => set('discount_amount', +e.target.value || 0)}
+                />
+              </div>
+              <span style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>or</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  className="form-control"
+                  style={{ maxWidth: 100 }}
+                  placeholder="% off"
+                  value={f.discount_percent || ''}
+                  onChange={e => set('discount_percent', +e.target.value || 0)}
+                />
+                <span style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>%</span>
+              </div>
+              {discountVal > 0 && (
+                <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--success, #22c55e)', whiteSpace: 'nowrap' }}>
+                  − ₹{discountVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} off
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Computation and Submit CTA */}
           <div className="line-items-actions">
             <div className="computation-summary-card">
               <div>
-                <span className="computation-label">Calculated Total (incl. taxes):</span>
+                <span className="computation-label">Subtotal (before discount):</span>
+                <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                  ₹{subtotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+                {discountVal > 0 && (
+                  <div style={{ fontSize: '0.8125rem', color: 'var(--success, #22c55e)' }}>
+                    − ₹{discountVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} discount
+                  </div>
+                )}
+                <span className="computation-label" style={{ marginTop: '0.25rem', display: 'block' }}>Calculated Total (incl. taxes):</span>
                 <div className="computation-total-val">₹{total.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
               </div>
 
@@ -398,7 +734,7 @@ export default function PM() {
                 </>
               ) : (
                 <>
-                  Submit for L1 Approval
+                  {editingId ? 'Save Changes' : 'Submit for L1 Approval'}
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="5" y1="12" x2="19" y2="12"></line>
                     <polyline points="12 5 19 12 12 19"></polyline>
@@ -443,6 +779,7 @@ export default function PM() {
                   <th>Vendor</th>
                   <th>Status</th>
                   <th>Latest Review Note</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -455,6 +792,17 @@ export default function PM() {
                     <td>{getStatusBadge(b.status)}</td>
                     <td style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
                       {b.history?.at(-1)?.comment || '—'}
+                    </td>
+                    <td>
+                      {['PENDING_L1', 'REJECTED_L1', 'REJECTED_FINANCE'].includes(b.status) && (
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => editBill(b)}
+                          style={{ whiteSpace: 'nowrap' }}
+                        >
+                          ✏️ Edit
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}

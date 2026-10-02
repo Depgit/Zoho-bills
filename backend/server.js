@@ -4,13 +4,14 @@ import cors from 'cors';
 import mongoose from 'mongoose';
 import fs from 'fs';
 import auth from './routes/auth.js';
-import zoho from './routes/zoho.js';
+import zohoRoutes from './routes/zoho.js';
 import bills from './routes/bills.js';
 import { Bill } from './models.js';
+import { fullSync } from './zoho.js';
 fs.mkdirSync('uploads', { recursive: true });
 const app = express();
 app.use(cors()); app.use(express.json());
-app.use('/api/auth', auth); app.use('/api/zoho', zoho); app.use('/api/bills', bills);
+app.use('/api/auth', auth); app.use('/api/zoho', zohoRoutes); app.use('/api/bills', bills);
 // remove uploads that were never submitted as a bill (older than 1 day)
 setInterval(async () => {
   for (const f of fs.readdirSync('uploads')) {
@@ -19,4 +20,7 @@ setInterval(async () => {
   }
 }, 36e5);
 await mongoose.connect(process.env.MONGO_URI);
+console.log('Syncing Zoho contacts...');
+await fullSync().catch(e => console.error('Contacts sync failed:', e));
+console.log('Contacts synced');
 app.listen(process.env.PORT || 5000, () => console.log('API up'));

@@ -27,6 +27,7 @@ export default function Review({ role }) {
   const [msg, setMsg] = useState('');
   const [loading, setLoading] = useState(false);
   const [filterText, setFilterText] = useState('');
+  const [taxes, setTaxes] = useState([]);
 
   const load = () => {
     setLoading(true);
@@ -38,10 +39,14 @@ export default function Review({ role }) {
 
   useEffect(() => {
     load();
+    api.get('/zoho/taxes')
+      .then(r => setTaxes(r.data || []))
+      .catch(e => console.warn('Could not load taxes:', e));
   }, []);
 
   const open = async b => {
-    setSel(b);
+    const cloned = JSON.parse(JSON.stringify(b));
+    setSel(cloned);
     setMsg('');
     setComment('');
     setPdf(null);
@@ -55,14 +60,38 @@ export default function Review({ role }) {
     }
   };
 
+  const handleTaxChange = (index, taxId) => {
+    setSel(prev => {
+      if (!prev) return prev;
+      const updatedLines = [...prev.lineItems];
+      updatedLines[index] = { ...updatedLines[index], tax_id: taxId };
+      return { ...prev, lineItems: updatedLines };
+    });
+  };
+
+  const getTaxName = (taxId) => {
+    const found = taxes.find(t => t.tax_id === taxId);
+    return found ? `${found.tax_name} (${found.tax_percentage}%)` : (taxId || 'Pending Finance');
+  };
+
   const act = async a => {
     if (a === 'reject' && !comment.trim()) {
       setMsg('Rejection comment is required to return the bill.');
       return;
     }
+    if (a === 'approve' && isFinance) {
+      const missingIndex = sel.lineItems.findIndex(l => !l.tax_id);
+      if (missingIndex >= 0) {
+        setMsg(`Please select a Zoho Tax Slab for line item ${missingIndex + 1} ("${sel.lineItems[missingIndex].name || 'Item'}") before approving.`);
+        return;
+      }
+    }
     setMsg('Processing request…');
     try {
-      await api.post(`/bills/${sel._id}/${a}`, { comment });
+      await api.post(`/bills/${sel._id}/${a}`, {
+        comment,
+        ...(isFinance && a === 'approve' ? { lineItems: sel.lineItems } : {})
+      });
       setSel(null);
       setMsg('');
       load();
@@ -197,13 +226,32 @@ export default function Review({ role }) {
                   {sel.extracted?.total || 'N/A'}
                 </span>
               </div>
+              {sel.location_id && (
+                <div className="detail-chip">
+                  <span className="detail-chip-label">Location:</span>
+                  <span className="detail-chip-val">{sel.location_id}</span>
+                </div>
+              )}
+              {sel.source_of_supply && (
+                <div className="detail-chip">
+                  <span className="detail-chip-label">Source of Supply:</span>
+                  <span className="detail-chip-val" style={{ fontWeight: 600 }}>{sel.source_of_supply}</span>
+                </div>
+              )}
             </div>
 
             {/* Line Items Breakdown */}
             <div>
-              <h4 style={{ fontSize: '0.875rem', fontWeight: 700, marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>
-                Line Items Allocation
-              </h4>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <h4 style={{ fontSize: '0.875rem', fontWeight: 700, margin: 0, color: 'var(--text-secondary)' }}>
+                  Line Items Allocation
+                </h4>
+                {isFinance && sel.status === 'PENDING_FINANCE' && (
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    * Finance: select appropriate Zoho Tax Slab (GST / IGST) for each item before approving
+                  </span>
+                )}
+              </div>
               <div className="table-responsive">
                 <table className="custom-table">
                   <thead>
@@ -211,28 +259,72 @@ export default function Review({ role }) {
                       <th>Item Description</th>
                       <th>Qty × Rate</th>
                       <th>Account Code</th>
-                      <th>Tax Code</th>
+                      <th>Tax % (PM)</th>
+                      <th>Tax Slab (Zoho)</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {sel.lineItems.map((l, i) => (
-                      <tr key={i}>
-                        <td style={{ fontWeight: 600 }}>{l.name || 'Unnamed item'}</td>
-                        <td>
-                          {l.quantity} × ₹{Number(l.rate || 0).toLocaleString()}
-                        </td>
-                        <td>
-                          <span style={{ fontFamily: 'monospace', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
-                            {l.account_id || '—'}
-                          </span>
-                        </td>
-                        <td>
-                          <span style={{ fontFamily: 'monospace', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
-                            {l.tax_id || '—'}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {sel.lineItems.map((l, i) => {
+                      const pmRate = l.tax_percentage !== undefined && l.tax_percentage !== null ? l.tax_percentage : null;
+                      const matchingTaxes = pmRate !== null ? taxes.filter(t => Number(t.tax_percentage) === Number(pmRate)) : [];
+                      const otherTaxes = pmRate !== null ? taxes.filter(t => Number(t.tax_percentage) !== Number(pmRate)) : taxes;
+
+                      return (
+                        <tr key={i}>
+                          <td style={{ fontWeight: 600 }}>{l.name || 'Unnamed item'}</td>
+                          <td>
+                            {l.quantity} × ₹{Number(l.rate || 0).toLocaleString()}
+                          </td>
+                          <td>
+                            <span style={{ fontFamily: 'monospace', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
+                              {l.account_id || '—'}
+                            </span>
+                          </td>
+                          <td>
+                            <span className="badge badge-info" style={{ fontWeight: 600 }}>
+                              {pmRate !== null ? `${pmRate}%` : '—'}
+                            </span>
+                          </td>
+                          <td>
+                            {isFinance && sel.status === 'PENDING_FINANCE' ? (
+                              <select
+                                className="form-control"
+                                style={{
+                                  fontSize: '0.8125rem',
+                                  padding: '0.35rem 0.5rem',
+                                  minWidth: '190px',
+                                  borderColor: !l.tax_id ? 'var(--warning, #f59e0b)' : 'var(--color-border)'
+                                }}
+                                value={l.tax_id || ''}
+                                onChange={e => handleTaxChange(i, e.target.value)}
+                              >
+                                <option value="">— Select Tax Slab —</option>
+                                {matchingTaxes.length > 0 && (
+                                  <optgroup label={`Matches PM Rate (${pmRate}%)`}>
+                                    {matchingTaxes.map(t => (
+                                      <option key={t.tax_id} value={t.tax_id}>
+                                        {t.tax_name} ({t.tax_percentage}%)
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                                <optgroup label={matchingTaxes.length > 0 ? "Other Tax Slabs" : "All Tax Slabs"}>
+                                  {otherTaxes.map(t => (
+                                    <option key={t.tax_id} value={t.tax_id}>
+                                      {t.tax_name} ({t.tax_percentage}%)
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              </select>
+                            ) : (
+                              <span style={{ fontFamily: 'monospace', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
+                                {getTaxName(l.tax_id)}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

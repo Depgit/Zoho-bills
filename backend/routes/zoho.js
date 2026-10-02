@@ -10,9 +10,7 @@ const cached = (k, fn) => async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.response?.data?.message || e.message }); }
 };
 r.get('/accounts', auth('PM'), cached('a', zoho.accounts));
-r.get('/taxes', auth('PM'), cached('t', zoho.taxes));
-r.get('/contacts', auth('PM'), async (req, res) => {
-  try { res.json(await zoho.contacts(req.query.search)); }
-  catch (e) { res.status(502).json({ error: e.response?.data?.message || e.message }); }
-});
+r.get('/taxes', auth('PM', 'FINANCE', 'L1'), cached('t', zoho.taxes));
+r.get('/contacts', auth('PM'), cached('c', () => zoho.contacts()));
+r.get('/locations', auth('FINANCE'), cached('l', zoho.locations));
 export default r;

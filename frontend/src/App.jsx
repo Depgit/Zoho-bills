@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { api, errMsg } from './api.js';
 import PM from './PM.jsx';
 import Review from './Review.jsx';
+import Admin from './Admin.jsx';
 
 export default function App() {
   const [user, setUser] = useState(() => JSON.parse(localStorage.getItem('user') || 'null'));
@@ -9,15 +10,12 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
+  const [tab, setTab] = useState('review'); // 'review' | 'admin'
 
   const login = async (e) => {
     if (e) e.preventDefault();
-    if (!email || !password) {
-      setErr('Please enter both email and password');
-      return;
-    }
-    setLoading(true);
-    setErr('');
+    if (!email || !password) { setErr('Please enter both email and password'); return; }
+    setLoading(true); setErr('');
     try {
       const { data } = await api.post('/auth/login', { email, password });
       localStorage.setItem('token', data.token);
@@ -30,10 +28,7 @@ export default function App() {
     }
   };
 
-  const logout = () => {
-    localStorage.clear();
-    setUser(null);
-  };
+  const logout = () => { localStorage.clear(); setUser(null); };
 
   if (!user) {
     return (
@@ -50,7 +45,7 @@ export default function App() {
               </svg>
             </div>
             <h2 className="auth-title">Bill Flow</h2>
-            <p className="auth-subtitle">AI-assisted invoice verification & Zoho Books approval workflow</p>
+            <p className="auth-subtitle">AI-assisted invoice verification &amp; Zoho Books approval workflow</p>
           </div>
 
           <form className="auth-form" onSubmit={login}>
@@ -63,15 +58,8 @@ export default function App() {
                     <polyline points="22,6 12,13 2,6"></polyline>
                   </svg>
                 </span>
-                <input
-                  className="form-control has-icon"
-                  placeholder="name@company.com"
-                  type="email"
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                  autoComplete="email"
-                  required
-                />
+                <input className="form-control has-icon" placeholder="name@company.com" type="email"
+                  value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" required />
               </div>
             </div>
 
@@ -84,15 +72,8 @@ export default function App() {
                     <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
                   </svg>
                 </span>
-                <input
-                  className="form-control has-icon"
-                  placeholder="••••••••"
-                  type="password"
-                  value={password}
-                  onChange={e => setPassword(e.target.value)}
-                  autoComplete="current-password"
-                  required
-                />
+                <input className="form-control has-icon" placeholder="••••••••" type="password"
+                  value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" required />
               </div>
             </div>
 
@@ -109,13 +90,8 @@ export default function App() {
 
             <button type="submit" className="btn btn-primary" style={{ marginTop: '0.5rem', width: '100%' }} disabled={loading}>
               {loading ? (
-                <>
-                  <div className="spinner" style={{ borderColor: 'rgba(255,255,255,0.3)', borderTopColor: '#fff', width: 16, height: 16 }}></div>
-                  Signing in...
-                </>
-              ) : (
-                'Sign In to Dashboard'
-              )}
+                <><div className="spinner" style={{ borderColor: 'rgba(255,255,255,0.3)', borderTopColor: '#fff', width: 16, height: 16 }}></div>Signing in...</>
+              ) : 'Sign In to Dashboard'}
             </button>
           </form>
         </div>
@@ -124,7 +100,7 @@ export default function App() {
   }
 
   const roleClass = user.role === 'PM' ? 'role-pm' : user.role === 'L1' ? 'role-l1' : 'role-finance';
-  const roleDisplay = user.role === 'PM' ? 'Project Manager' : user.role === 'L1' ? 'L1 Approver' : 'Finance Manager';
+  const roleDisplay = user.role === 'PM' ? 'Property Manager' : user.role === 'L1' ? 'L1 Approver' : 'Finance Manager';
 
   return (
     <div className="app-container">
@@ -144,19 +120,17 @@ export default function App() {
               BillFlow
               <span className="brand-badge">Zoho Sync</span>
             </div>
-            <span className="brand-subtitle">Invoice Approvals & Books Sync</span>
+            <span className="brand-subtitle">Invoice Approvals &amp; Books Sync</span>
           </div>
         </div>
 
+        {/* Finance tab switcher — rendered as part of brand section for visibility */}
         <div className="user-nav-actions">
           <div className="user-profile-badge">
-            <div className="user-avatar-circle">
-              {user.name ? user.name[0] : 'U'}
-            </div>
+            <div className="user-avatar-circle">{user.name ? user.name[0] : 'U'}</div>
             <span className="user-meta-name">{user.name}</span>
             <span className={`role-tag ${roleClass}`}>{roleDisplay}</span>
           </div>
-
           <button onClick={logout} className="btn-logout" title="Sign out of session">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
@@ -168,8 +142,34 @@ export default function App() {
         </div>
       </nav>
 
+      {/* Finance sub-nav */}
+      {user.role === 'FINANCE' && (
+        <div style={{
+          background: 'var(--color-surface-subtle, #f8fafc)',
+          borderBottom: '1px solid var(--color-border)',
+          padding: '0.5rem 2rem',
+          display: 'flex',
+          gap: '0.5rem',
+        }}>
+          <button
+            className={`btn btn-sm ${tab === 'review' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setTab('review')}
+          >
+            📋 Finance Review Queue
+          </button>
+          <button
+            className={`btn btn-sm ${tab === 'admin' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setTab('admin')}
+          >
+            ⚙ Manage Users
+          </button>
+        </div>
+      )}
+
       <main className="main-content">
-        {user.role === 'PM' ? <PM /> : <Review role={user.role} />}
+        {user.role === 'PM' && <PM />}
+        {user.role === 'L1' && <Review role={user.role} />}
+        {user.role === 'FINANCE' && (tab === 'admin' ? <Admin /> : <Review role={user.role} />)}
       </main>
     </div>
   );
