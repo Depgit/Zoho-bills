@@ -2,6 +2,19 @@ import axios from 'axios';
 import fs from 'fs';
 import FormData from 'form-data';
 import { Contact } from './models.js';
+import { constants } from 'crypto';
+import https from "https";
+
+// Relaxed TLS agent for Zoho (fixes ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR / alert 80)
+const zohoAgent = new https.Agent({
+  ciphers: 'DEFAULT:@SECLEVEL=0',
+  minVersion: 'TLSv1.2',
+  // Only needed if you ALSO see "unsafe legacy renegotiation disabled"
+  secureOptions: constants.SSL_OP_LEGACY_SERVER_CONNECT,
+});
+
+// A pre-configured axios instance that uses the agent
+const zohoHttp = axios.create({ httpsAgent: zohoAgent });
 
 // Per-org token cache: orgId (string) -> { token, exp }
 const tokenCache = {};
@@ -10,7 +23,7 @@ async function getToken(org) {
   const key = String(org._id);
   const cached = tokenCache[key];
   if (cached && Date.now() < cached.exp) return cached.token;
-  const r = await axios.post(`${org.zohoAccountsUrl}/oauth/v2/token`, null, {
+  const r = await zohoHttp.post(`${org.zohoAccountsUrl}/oauth/v2/token`, null, {
     params: {
       refresh_token: org.zohoRefreshToken,
       client_id: org.zohoClientId,
@@ -23,8 +36,18 @@ async function getToken(org) {
   return tokenCache[key].token;
 }
 
+// async function z(org, method, path, { params, data, headers } = {}) {
+//   const r = await axios({
+//     method,
+//     url: `${org.zohoApiUrl}/books/v3${path}`,
+//     params: { organization_id: org.zohoOrgId, ...params },
+//     data,
+//     headers: { Authorization: `Zoho-oauthtoken ${await getToken(org)}`, ...headers }
+//   });
+//   return r.data;
+// }
 async function z(org, method, path, { params, data, headers } = {}) {
-  const r = await axios({
+  const r = await zohoHttp({
     method,
     url: `${org.zohoApiUrl}/books/v3${path}`,
     params: { organization_id: org.zohoOrgId, ...params },
@@ -38,17 +61,36 @@ async function z(org, method, path, { params, data, headers } = {}) {
  * Validate that the given credentials can successfully get a Zoho token and
  * retrieve the org's organisation name. Returns the org display name on success.
  */
+// export async function validateZohoCredentials({ zohoClientId, zohoClientSecret, zohoRefreshToken, zohoOrgId, zohoAccountsUrl, zohoApiUrl }) {
+//   const accountsUrl = zohoAccountsUrl || 'https://accounts.zoho.in';
+//   const apiUrl = zohoApiUrl || 'https://www.zohoapis.in';
+//   // Step 1: Get an access token
+//   const tokenRes = await zohoHttp.post(`${accountsUrl}/oauth/v2/token`, null, {
+//     params: { refresh_token: zohoRefreshToken, client_id: zohoClientId, client_secret: zohoClientSecret, grant_type: 'refresh_token' }
+//   });
+//   if (!tokenRes.data.access_token) throw new Error('Could not obtain Zoho access token. Check Client ID, Secret, and Refresh Token.');
+//   const accessToken = tokenRes.data.access_token;
+//   // Step 2: Fetch the organisation details to confirm orgId is valid
+//   const orgRes = await zohoHttp.get(`${apiUrl}/books/v3/organizations`, {
+//     headers: { Authorization: `Zoho-oauthtoken ${accessToken}` }
+//   });
+//   const orgs = orgRes.data?.organizations || [];
+//   const matched = orgs.find(o => String(o.organization_id) === String(zohoOrgId));
+//   if (!matched) throw new Error(`Org ID "${zohoOrgId}" not found in this Zoho account. Available: ${orgs.map(o => o.organization_id).join(', ')}`);
+//   return matched.name || matched.organization_name || matched.organization_id;
+// }
+
 export async function validateZohoCredentials({ zohoClientId, zohoClientSecret, zohoRefreshToken, zohoOrgId, zohoAccountsUrl, zohoApiUrl }) {
   const accountsUrl = zohoAccountsUrl || 'https://accounts.zoho.in';
   const apiUrl = zohoApiUrl || 'https://www.zohoapis.in';
-  // Step 1: Get an access token
-  const tokenRes = await axios.post(`${accountsUrl}/oauth/v2/token`, null, {
+
+  const tokenRes = await zohoHttp.post(`${accountsUrl}/oauth/v2/token`, null, {
     params: { refresh_token: zohoRefreshToken, client_id: zohoClientId, client_secret: zohoClientSecret, grant_type: 'refresh_token' }
   });
   if (!tokenRes.data.access_token) throw new Error('Could not obtain Zoho access token. Check Client ID, Secret, and Refresh Token.');
   const accessToken = tokenRes.data.access_token;
-  // Step 2: Fetch the organisation details to confirm orgId is valid
-  const orgRes = await axios.get(`${apiUrl}/books/v3/organizations`, {
+
+  const orgRes = await zohoHttp.get(`${apiUrl}/books/v3/organizations`, {
     headers: { Authorization: `Zoho-oauthtoken ${accessToken}` }
   });
   const orgs = orgRes.data?.organizations || [];
