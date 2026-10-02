@@ -3,4 +3,4 @@ backend/node_modules
 frontend/node_modules
 .DS_Store
 backend/seed.js
-backend/upload/*
+backend/uploads/*
