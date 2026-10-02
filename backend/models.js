@@ -1,7 +1,20 @@
 import mongoose from 'mongoose';
 const { Schema, model } = mongoose;
+
+// One document per Finance Manager registration — stores Zoho credentials for that org
+export const FinanceOrg = model('FinanceOrg', new Schema({
+  userId:           { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+  zohoClientId:     { type: String, required: true },
+  zohoClientSecret: { type: String, required: true },
+  zohoRefreshToken: { type: String, required: true },
+  zohoOrgId:        { type: String, required: true },
+  zohoAccountsUrl:  { type: String, default: 'https://accounts.zoho.in' },
+  zohoApiUrl:       { type: String, default: 'https://www.zohoapis.in' },
+  displayName:      { type: String },          // fetched from Zoho org at registration
+}, { timestamps: true }));
+
 export const Contact = model('Contact', new Schema({
-  orgId: String,
+  financeOrgId: { type: Schema.Types.ObjectId, ref: 'FinanceOrg', required: true },
   contact_id: String,
   contact_name: String,
   gst_no: String,
@@ -16,6 +29,8 @@ export const User = model('User', new Schema({
   source_of_supply: { type: String, default: '' },
   location_id: { type: String, default: '' },
   location_name: { type: String, default: '' },
+  // For PM/L1: the FinanceOrg they belong to. For FINANCE: their own FinanceOrg.
+  financeOrgId: { type: Schema.Types.ObjectId, ref: 'FinanceOrg', default: null },
 }));
 export const Bill = model('Bill', new Schema({
   pdfFile: String,                       // local filename in /uploads, nulled after Zoho upload
@@ -33,6 +48,7 @@ export const Bill = model('Bill', new Schema({
     enum: ['PENDING_L1', 'PENDING_FINANCE', 'POSTED', 'REJECTED_L1', 'REJECTED_FINANCE']
   },
   createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  financeOrgId: { type: Schema.Types.ObjectId, ref: 'FinanceOrg', required: true },
   history: [{ _id: false, by: String, action: String, comment: String, at: { type: Date, default: Date.now } }],
   zohoBillId: String, zohoError: String
 }, { timestamps: true }));

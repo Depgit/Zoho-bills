@@ -626,9 +626,9 @@ function mergeResults(gem, tess, reg) {
   const r = reg || {};
 
   // Debug dump (kept on for now — comment out if noisy).
-  console.log('gemini ', g);
-  console.log('tess   ', t);
-  console.log('regex  ', r);
+  // console.log('gemini ', g);
+  // console.log('tess   ', t);
+  // console.log('regex  ', r);
 
   // Seller GSTIN: prefer the explicit `gstin` from any source, then fall back
   // to the first element of any `gstins` array.
@@ -672,6 +672,54 @@ function mergeResults(gem, tess, reg) {
     },
   };
 }
+
+// ──────────── DeepSeek (text-only fallback via pdf-parse) ────────────
+async function viaDeepSeek(file, mimeType = 'application/pdf', trimmed = null) {
+  if (mimeType?.startsWith('image/')) {
+    throw new Error('DeepSeek does not support image input');
+  }
+
+  const bytes = trimmed ? trimmed.bytes : fs.readFileSync(file);
+  const { text } = await pdf(bytes);
+  if (!text || text.trim().length < 20) {
+    throw new Error('No extractable text in PDF for DeepSeek');
+  }
+
+  const data = await withRetry(async () => {
+    const r = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+        messages: [
+          {
+            role: 'system',
+            content: 'You extract structured data from Indian GST tax invoices. Reply with ONLY valid JSON, no markdown fences.',
+          },
+          { role: 'user', content: `${PROMPT}\n\n---INVOICE TEXT---\n${text}` },
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 2000,
+        temperature: 0,
+      }),
+    });
+
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      const err = new Error(`DeepSeek HTTP ${r.status}: ${body.slice(0, 200)}`);
+      err.status = r.status;
+      throw err;
+    }
+    return r.json();
+  });
+
+  const content = data?.choices?.[0]?.message?.content || '{}';
+  return JSON.parse(content.replace(/```json|```/g, '').trim());
+}
+
 
 // ──────────────────────────── ENTRY ────────────────────────────
 export async function extract(file, mimeType = 'application/pdf') {

@@ -6,7 +6,7 @@ import fs from 'fs';
 import auth from './routes/auth.js';
 import zohoRoutes from './routes/zoho.js';
 import bills from './routes/bills.js';
-import { Bill } from './models.js';
+import { Bill, FinanceOrg } from './models.js';
 import { fullSync } from './zoho.js';
 fs.mkdirSync('uploads', { recursive: true });
 const app = express();
@@ -20,7 +20,15 @@ setInterval(async () => {
   }
 }, 36e5);
 await mongoose.connect(process.env.MONGO_URI);
-console.log('Syncing Zoho contacts...');
-await fullSync().catch(e => console.error('Contacts sync failed:', e));
-console.log('Contacts synced');
+// Sync Zoho contacts for every registered Finance Org
+const orgs = await FinanceOrg.find({});
+if (orgs.length === 0) {
+  console.log('No Finance Orgs registered yet — skipping contact sync');
+} else {
+  console.log(`Syncing Zoho contacts for ${orgs.length} Finance Org(s)...`);
+  await Promise.all(orgs.map(org =>
+    fullSync(org).catch(e => console.error(`Contacts sync failed for org ${org.zohoOrgId}:`, e.message))
+  ));
+  console.log('Contacts synced');
+}
 app.listen(process.env.PORT || 5000, () => console.log('API up'));

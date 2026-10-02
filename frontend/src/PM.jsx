@@ -33,7 +33,7 @@ function getStatusBadge(status) {
   }
 }
 
-export default function PM() {
+export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHistory }) {
   const [accounts, setA] = useState([]);
   const [taxes, setT] = useState([]);
   const [contacts, setC] = useState([]);
@@ -61,6 +61,13 @@ export default function PM() {
     loadContacts();
     loadMine();
   }, []);
+
+  useEffect(() => {
+    if (initialEditBill) {
+      editBill(initialEditBill);
+      if (onClearInitialEdit) onClearInitialEdit();
+    }
+  }, [initialEditBill]);
 
   // Refresh vendor list (called from Search button or on demand)
   const searchVendors = async () => {
@@ -292,6 +299,21 @@ export default function PM() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const deleteBill = async (b) => {
+    if (!window.confirm(`Are you sure you want to delete bill #${b.billNumber}? You will be able to make a fresh new entry.`)) return;
+    try {
+      await api.delete(`/bills/${b._id}`);
+      setMsg(`✓ Bill #${b.billNumber} deleted. You can now create a new bill entry.`);
+      if (editingId === b._id) {
+        setEditingId(null);
+        setF(null);
+      }
+      loadMine();
+    } catch (e) {
+      setMsg(errMsg(e));
+    }
+  };
+
   const parsedExtractedTotal = parseFloat(String(f?.extracted?.total || '').replace(/[^0-9.]/g, '')) || 0;
   const totalsMatch = Math.abs(total - parsedExtractedTotal) < 1;
 
@@ -299,8 +321,35 @@ export default function PM() {
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Project Manager Portal</h1>
-          <p className="page-description">Upload invoices, review AI-extracted fields, allocate line items, and submit for verification.</p>
+          <h1 className="page-title">
+            {editingId ? `Edit Bill #${f?.billNumber || ''}` : 'Upload & Create Invoice'}
+          </h1>
+          <p className="page-description">
+            {editingId
+              ? 'Update bill details or fix rejected fields, then save changes to resubmit for approval.'
+              : 'Upload invoices, review AI-extracted fields, allocate line items, and submit for verification.'}
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          {editingId && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => { setEditingId(null); setF(null); setMsg(''); }}
+            >
+              Cancel Edit / New Bill
+            </button>
+          )}
+          {onNavigateHistory && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={onNavigateHistory}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}
+            >
+              📜 View Invoice History →
+            </button>
+          )}
         </div>
       </div>
 
@@ -748,7 +797,7 @@ export default function PM() {
 
       {/* Submitted Bills Table */}
       <div className="card">
-        <div className="card-header">
+        <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div className="card-title">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--primary)' }}>
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
@@ -756,9 +805,18 @@ export default function PM() {
               <line x1="16" y1="13" x2="8" y2="13"></line>
               <line x1="16" y1="17" x2="8" y2="17"></line>
             </svg>
-            My Submitted Bills
+            My Recent Submissions
             <span className="count-pill" style={{ marginLeft: '0.5rem' }}>{mine.length}</span>
           </div>
+          {onNavigateHistory && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={onNavigateHistory}
+            >
+              📜 View Full History &amp; Analytics →
+            </button>
+          )}
         </div>
 
         {mine.length === 0 ? (
@@ -793,7 +851,7 @@ export default function PM() {
                     <td style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
                       {b.history?.at(-1)?.comment || '—'}
                     </td>
-                    <td>
+                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                       {['PENDING_L1', 'REJECTED_L1', 'REJECTED_FINANCE'].includes(b.status) && (
                         <button
                           className="btn btn-secondary btn-sm"
@@ -801,6 +859,16 @@ export default function PM() {
                           style={{ whiteSpace: 'nowrap' }}
                         >
                           ✏️ Edit
+                        </button>
+                      )}
+                      {['REJECTED_L1', 'REJECTED_FINANCE', 'PENDING_L1'].includes(b.status) && (
+                        <button
+                          className="btn btn-outline-danger btn-sm"
+                          onClick={() => deleteBill(b)}
+                          style={{ whiteSpace: 'nowrap', marginLeft: '0.4rem' }}
+                          title="Delete bill and make a fresh entry"
+                        >
+                          🗑️ Delete
                         </button>
                       )}
                     </td>
