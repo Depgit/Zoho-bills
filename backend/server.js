@@ -1,4 +1,26 @@
 import 'dotenv/config';
+import tls from 'tls';
+import { constants as cryptoConstants } from 'crypto';
+
+// ── Global TLS compatibility patch ───────────────────────────────────────────
+// Fixes: MongoNetworkError: SSL alert number 80 (tlsv1 alert internal error)
+// on Render / Node 18+ with OpenSSL 3.x strict defaults.
+// This relaxes cipher security level for ALL outbound TLS (MongoDB + Zoho).
+tls.DEFAULT_CIPHERS = 'DEFAULT:@SECLEVEL=0';
+tls.DEFAULT_MIN_VERSION = 'TLSv1.2';
+// Allow legacy TLS renegotiation (needed by some Mongo/Zoho endpoints)
+try {
+  // secureOptions is not directly settable on the tls module, but we can
+  // patch it via the underlying SecureContext defaults where supported.
+  const origCreateSecureContext = tls.createSecureContext.bind(tls);
+  tls.createSecureContext = (opts = {}) =>
+    origCreateSecureContext({
+      secureOptions: cryptoConstants.SSL_OP_LEGACY_SERVER_CONNECT,
+      ...opts,
+    });
+} catch { /* non-fatal — patch is best-effort */ }
+// ─────────────────────────────────────────────────────────────────────────────
+
 import express from 'express';
 import cors from 'cors';
 import mongoose from 'mongoose';
