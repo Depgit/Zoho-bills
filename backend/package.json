@@ -3,6 +3,7 @@
     "type": "module",
     "scripts": {
         "start": "node server.js",
+        "restart": "lsof -ti:8080 | xargs kill -9 2>/dev/null; node server.js",
         "seed": "node seed.js"
     },
     "dependencies": {
