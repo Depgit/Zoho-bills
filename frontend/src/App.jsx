@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
-import { api, errMsg } from './api.js';
-import PM from './PM.jsx';
+import { api, showError } from './api.js';
+import ErrorModal from './ErrorModal.jsx';
+import { ROLE_NAME } from './billUtils.jsx';
+import BillForm from './BillForm.jsx';
 import Review from './Review.jsx';
 import Admin from './Admin.jsx';
 import InvoiceHistory from './InvoiceHistory.jsx';
 
-// ── Finance Manager registration form ────────────────────────────────────────
-function RegisterFinance({ onBack, onSuccess }) {
+// ── Organisation registration: creates the one Admin + Zoho connection ─────────
+function RegisterOrg({ onBack, onSuccess }) {
   const [form, setForm] = useState({
     name: '', email: '', password: '',
     zohoClientId: '', zohoClientSecret: '', zohoRefreshToken: '', zohoOrgId: '',
@@ -14,21 +16,20 @@ function RegisterFinance({ onBack, onSuccess }) {
     zohoApiUrl: 'https://www.zohoapis.in',
   });
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState('');
   const [step, setStep] = useState(1); // 1 = account details, 2 = zoho credentials
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setLoading(true); setErr('');
+    setLoading(true);
     try {
-      const { data } = await api.post('/auth/register-finance', form);
+      const { data } = await api.post('/auth/register', form);
       localStorage.setItem('token', data.token);
       localStorage.setItem('user', JSON.stringify(data.user));
       onSuccess(data.user, data.zohoOrgName);
     } catch (e) {
-      setErr(errMsg(e));
+      showError(e);
     } finally {
       setLoading(false);
     }
@@ -44,7 +45,7 @@ function RegisterFinance({ onBack, onSuccess }) {
               <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path>
             </svg>
           </div>
-          <h2 className="auth-title">Register Finance Manager</h2>
+          <h2 className="auth-title">Register Your Organisation</h2>
           <p className="auth-subtitle">Connect your Zoho Books account to get started</p>
         </div>
 
@@ -73,7 +74,7 @@ function RegisterFinance({ onBack, onSuccess }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
               <div className="form-field">
                 <label className="form-label">Full Name</label>
-                <input className="form-control" placeholder="Finance Manager Name" value={form.name} onChange={set('name')} required />
+                <input className="form-control" placeholder="Admin Name" value={form.name} onChange={set('name')} required />
               </div>
               <div className="form-field">
                 <label className="form-label">Email Address</label>
@@ -85,8 +86,8 @@ function RegisterFinance({ onBack, onSuccess }) {
               </div>
               <button type="button" className="btn btn-primary" style={{ width: '100%', marginTop: '0.25rem' }}
                 onClick={() => {
-                  if (!form.name || !form.email || !form.password) { setErr('Please fill all fields'); return; }
-                  setErr(''); setStep(2);
+                  if (!form.name || !form.email || !form.password) { showError('Please fill in name, email and password'); return; }
+                  setStep(2);
                 }}>
                 Next: Zoho Credentials →
               </button>
@@ -133,19 +134,8 @@ function RegisterFinance({ onBack, onSuccess }) {
                 </div>
               </details>
 
-              {err && (
-                <div className="error-banner">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <line x1="12" y1="8" x2="12" y2="12"></line>
-                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                  </svg>
-                  <span>{err}</span>
-                </div>
-              )}
-
               <div style={{ display: 'flex', gap: '0.75rem' }}>
-                <button type="button" className="btn btn-secondary" style={{ flex: '0 0 auto', padding: '0 1.25rem' }} onClick={() => { setErr(''); setStep(1); }}>
+                <button type="button" className="btn btn-secondary" style={{ flex: '0 0 auto', padding: '0 1.25rem' }} onClick={() => setStep(1)}>
                   ← Back
                 </button>
                 <button type="submit" className="btn btn-primary" style={{ flex: 1 }} disabled={loading}>
@@ -170,44 +160,61 @@ function RegisterFinance({ onBack, onSuccess }) {
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────────
+// Errors anywhere in the app show in one popup
 export default function App() {
+  return (
+    <>
+      <Shell />
+      <ErrorModal />
+    </>
+  );
+}
+
+// Tabs per role. Approvers (CM/OM/FM) also upload; Admin manages users and all bills.
+const TABS = {
+  PM: [['upload', '📤 Upload Bill'], ['history', '📜 Invoice History']],
+  CM: [['queue', '📋 Approval Queue'], ['upload', '📤 Upload Bill'], ['history', '📜 Invoice History']],
+  OM: [['queue', '📋 Approval Queue'], ['upload', '📤 Upload Bill'], ['history', '📜 Invoice History']],
+  FM: [['queue', '📋 Approval Queue'], ['upload', '📤 Upload Bill (direct to Zoho)'], ['history', '📜 Invoice History']],
+  ADMIN: [['users', '👥 Users & Hierarchy'], ['queue', '⏳ All Pending'], ['history', '📜 All Bills']],
+};
+
+function Shell() {
   const [user, setUser] = useState(() => JSON.parse(localStorage.getItem('user') || 'null'));
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
-  const [tab, setTab] = useState('review'); // 'review' | 'history' | 'admin'
-  const [pmTab, setPmTab] = useState('upload'); // 'upload' | 'history'
+  const [tab, setTab] = useState(null);           // null → first tab of the role
   const [editBillData, setEditBillData] = useState(null);
   const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
   const [welcomeMsg, setWelcomeMsg] = useState('');
 
   const login = async (e) => {
     if (e) e.preventDefault();
-    if (!email || !password) { setErr('Please enter both email and password'); return; }
-    setLoading(true); setErr('');
+    if (!email || !password) { showError('Please enter both email and password'); return; }
+    setLoading(true);
     try {
       const { data } = await api.post('/auth/login', { email, password });
       localStorage.setItem('token', data.token);
       localStorage.setItem('user', JSON.stringify(data.user));
       setUser(data.user);
     } catch (e) {
-      setErr(errMsg(e));
+      showError(e);
     } finally {
       setLoading(false);
     }
   };
 
-  const logout = () => { localStorage.clear(); setUser(null); setAuthMode('login'); setWelcomeMsg(''); };
+  const logout = () => { localStorage.clear(); setUser(null); setTab(null); setAuthMode('login'); setWelcomeMsg(''); };
 
-  // ── Finance Manager Registration ──
+  // ── Organisation registration (creates the Admin) ──
   if (!user && authMode === 'register') {
     return (
-      <RegisterFinance
-        onBack={() => { setAuthMode('login'); setErr(''); }}
+      <RegisterOrg
+        onBack={() => setAuthMode('login')}
         onSuccess={(u, orgName) => {
           setUser(u);
-          setWelcomeMsg(`🎉 Welcome! Your Finance Manager account is connected to Zoho org "${orgName}". You can now create PM and L1 accounts.`);
+          setWelcomeMsg(`🎉 Welcome! Your organisation is connected to Zoho org "${orgName}". Create your Finance, Operations, Cluster and Property Managers in Users & Hierarchy.`);
         }}
       />
     );
@@ -261,17 +268,6 @@ export default function App() {
               </div>
             </div>
 
-            {err && (
-              <div className="error-banner">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10"></circle>
-                  <line x1="12" y1="8" x2="12" y2="12"></line>
-                  <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                </svg>
-                <span>{err}</span>
-              </div>
-            )}
-
             <button type="submit" className="btn btn-primary" style={{ marginTop: '0.5rem', width: '100%' }} disabled={loading}>
               {loading ? (
                 <><div className="spinner" style={{ borderColor: 'rgba(255,255,255,0.3)', borderTopColor: '#fff', width: 16, height: 16 }}></div>Signing in...</>
@@ -279,7 +275,7 @@ export default function App() {
             </button>
           </form>
 
-          {/* Register Finance Manager CTA */}
+          {/* Register organisation CTA */}
           <div style={{
             marginTop: '1.5rem', padding: '1rem', borderRadius: 'var(--radius-md)',
             background: 'linear-gradient(135deg, rgba(5, 150, 105, 0.06) 0%, rgba(16, 185, 129, 0.06) 100%)',
@@ -287,10 +283,10 @@ export default function App() {
             textAlign: 'center',
           }}>
             <p style={{ fontSize: '0.83rem', color: 'var(--text-secondary)', marginBottom: '0.6rem', fontWeight: 500 }}>
-              Are you a Finance Manager?
+              New organisation? Register as its Admin
             </p>
             <button
-              onClick={() => { setErr(''); setAuthMode('register'); }}
+              onClick={() => setAuthMode('register')}
               className="btn btn-sm"
               style={{
                 background: 'linear-gradient(135deg, #059669 0%, #10b981 100%)',
@@ -306,8 +302,11 @@ export default function App() {
     );
   }
 
-  const roleClass = user.role === 'PM' ? 'role-pm' : user.role === 'L1' ? 'role-l1' : 'role-finance';
-  const roleDisplay = user.role === 'PM' ? 'Property Manager' : user.role === 'L1' ? 'L1 Approver' : 'Finance Manager';
+  const roleClass = user.role === 'PM' ? 'role-pm' : user.role === 'FM' || user.role === 'ADMIN' ? 'role-finance' : 'role-l1';
+  const roleDisplay = ROLE_NAME[user.role] || user.role;
+  const tabs = TABS[user.role] || [];
+  const active = tabs.some(([k]) => k === tab) ? tab : tabs[0]?.[0];
+  const go = (k) => { setTab(k); if (k !== 'upload') setEditBillData(null); };
 
   return (
     <div className="app-container">
@@ -331,7 +330,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Finance tab switcher — rendered as part of brand section for visibility */}
+        {/* User badge + logout */}
         <div className="user-nav-actions">
           <div className="user-profile-badge">
             <div className="user-avatar-circle">{user.name ? user.name[0] : 'U'}</div>
@@ -349,7 +348,7 @@ export default function App() {
         </div>
       </nav>
 
-      {/* Welcome banner for newly registered Finance Managers */}
+      {/* Welcome banner for a newly registered Admin */}
       {welcomeMsg && (
         <div style={{
           background: 'linear-gradient(135deg, rgba(5, 150, 105, 0.08) 0%, rgba(16, 185, 129, 0.05) 100%)',
@@ -363,87 +362,38 @@ export default function App() {
         </div>
       )}
 
-      {/* PM sub-nav */}
-      {user.role === 'PM' && (
-        <div style={{
-          background: 'var(--color-surface-subtle, #f8fafc)',
-          borderBottom: '1px solid var(--color-border)',
-          padding: '0.5rem 2rem',
-          display: 'flex',
-          gap: '0.5rem',
-        }}>
-          <button
-            className={`btn btn-sm ${pmTab === 'upload' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => { setPmTab('upload'); setEditBillData(null); }}
-          >
-            📤 Upload &amp; Create Bill
+      {/* Role tabs */}
+      <div style={{
+        background: 'var(--color-surface-subtle, #f8fafc)',
+        borderBottom: '1px solid var(--color-border)',
+        padding: '0.5rem 2rem',
+        display: 'flex', gap: '0.5rem', flexWrap: 'wrap',
+      }}>
+        {tabs.map(([k, label]) => (
+          <button key={k} className={`btn btn-sm ${active === k ? 'btn-primary' : 'btn-secondary'}`} onClick={() => go(k)}>
+            {label}
           </button>
-          <button
-            className={`btn btn-sm ${pmTab === 'history' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setPmTab('history')}
-          >
-            📜 Invoice History &amp; Analytics
-          </button>
-        </div>
-      )}
-
-      {/* L1 / Finance sub-nav */}
-      {(user.role === 'FINANCE' || user.role === 'L1') && (
-        <div style={{
-          background: 'var(--color-surface-subtle, #f8fafc)',
-          borderBottom: '1px solid var(--color-border)',
-          padding: '0.5rem 2rem',
-          display: 'flex',
-          gap: '0.5rem',
-        }}>
-          <button
-            className={`btn btn-sm ${tab === 'review' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setTab('review')}
-          >
-            📋 {user.role === 'L1' ? 'L1 Review Queue' : 'Finance Review Queue'}
-          </button>
-          <button
-            className={`btn btn-sm ${tab === 'history' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setTab('history')}
-          >
-            📜 Invoice History &amp; Analytics
-          </button>
-          {user.role === 'FINANCE' && (
-            <button
-              className={`btn btn-sm ${tab === 'admin' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setTab('admin')}
-            >
-              ⚙ Manage Users
-            </button>
-          )}
-        </div>
-      )}
+        ))}
+      </div>
 
       <main className="main-content">
-        {user.role === 'PM' && (
-          pmTab === 'history' ? (
-            <InvoiceHistory
-              onEditBill={(b) => {
-                setEditBillData(b);
-                setPmTab('upload');
-              }}
-              onNewEntry={() => {
-                setEditBillData(null);
-                setPmTab('upload');
-              }}
-            />
-          ) : (
-            <PM
-              initialEditBill={editBillData}
-              onClearInitialEdit={() => setEditBillData(null)}
-              onNavigateHistory={() => setPmTab('history')}
-            />
-          )
+        {active === 'users' && <Admin />}
+        {active === 'queue' && <Review role={user.role} />}
+        {active === 'upload' && (
+          <BillForm
+            role={user.role}
+            initialEditBill={editBillData}
+            onClearInitialEdit={() => setEditBillData(null)}
+            onNavigateHistory={() => go('history')}
+          />
         )}
-        {user.role !== 'PM' && (
-          tab === 'history' ? <InvoiceHistory role={user.role} />
-            : tab === 'admin' && user.role === 'FINANCE' ? <Admin />
-              : <Review role={user.role} />
+        {active === 'history' && (
+          <InvoiceHistory
+            role={user.role}
+            userId={user.id}
+            onEditBill={(b) => { setEditBillData(b); setTab('upload'); }}
+            onNewEntry={() => { setEditBillData(null); setTab('upload'); }}
+          />
         )}
       </main>
     </div>

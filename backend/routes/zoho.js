@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { auth } from '../mw.js';
+import { UPLOAD_ROLES } from '../hierarchy.js';
 import * as zoho from '../zoho.js';
 import { FinanceOrg } from '../models.js';
 const r = Router();
@@ -9,7 +10,7 @@ const cache = {};
 
 /**
  * Middleware: load the FinanceOrg document for the requesting user and attach it to req.financeOrg
- * Works for FINANCE (their own org) and PM/L1 (their manager's org via financeOrgId on User)
+ * Every user (Admin, FM, OM, CM, PM) belongs to one org via financeOrgId
  */
 async function loadOrg(req, res, next) {
   try {
@@ -29,17 +30,17 @@ const orgCached = (suffix, fn) => [loadOrg, async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.response?.data?.message || e.message }); }
 }];
 
-r.get('/accounts', auth('PM'), ...orgCached('accounts', zoho.accounts));
-r.get('/taxes', auth('PM', 'FINANCE', 'L1'), ...orgCached('taxes', zoho.taxes));
-r.get('/contacts', auth('PM'), [loadOrg, async (req, res) => {
+r.get('/accounts', auth(...UPLOAD_ROLES), ...orgCached('accounts', zoho.accounts));
+r.get('/taxes', auth(), ...orgCached('taxes', zoho.taxes));
+r.get('/contacts', auth(...UPLOAD_ROLES), [loadOrg, async (req, res) => {
   try {
     res.json(await zoho.contacts(req.financeOrg, req.query.search || ''));
   } catch (e) { res.status(502).json({ error: e.response?.data?.message || e.message }); }
 }]);
-r.get('/locations', auth('FINANCE'), ...orgCached('locations', zoho.locations));
+r.get('/locations', auth(), ...orgCached('locations', zoho.locations));
 
 // Trigger manual re-sync of contacts for this org
-r.post('/sync', auth('FINANCE'), loadOrg, async (req, res) => {
+r.post('/sync', auth('ADMIN', 'FM'), loadOrg, async (req, res) => {
   try {
     await zoho.fullSync(req.financeOrg);
     res.json({ ok: true });

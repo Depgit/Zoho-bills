@@ -1,39 +1,33 @@
 import React, { useEffect, useState } from 'react';
-import { api, errMsg } from './api.js';
+import { api, showError } from './api.js';
+import { StatusBadge, isEditable, inr, currentUser, idOf, ROLE_NAME, MANAGER_ROLE } from './billUtils.jsx';
+import SearchSelect from './SearchSelect.jsx';
 
 const blank = { name: '', description: '', quantity: 1, rate: '', account_id: '', tax_percentage: 0, tax_id: '' };
 
 function Sel({ v, on, opts, id, label, className = '' }) {
   return (
-    <select value={v} onChange={e => on(e.target.value)} className={`form-control ${className}`}>
+    <SearchSelect value={v} onChange={e => on(e.target.value)} className={`form-control ${className}`}>
       <option value="">— {label} —</option>
       {opts.map(o => (
         <option key={o[id]} value={o[id]}>
           {o.label}
         </option>
       ))}
-    </select>
+    </SearchSelect>
   );
 }
 
-function getStatusBadge(status) {
-  switch (status) {
-    case 'PENDING_L1':
-      return <span className="badge-status badge-pending-l1">Pending L1</span>;
-    case 'PENDING_FINANCE':
-      return <span className="badge-status badge-pending-finance">Pending Finance</span>;
-    case 'POSTED':
-      return <span className="badge-status badge-posted">Posted to Zoho</span>;
-    case 'REJECTED_L1':
-      return <span className="badge-status badge-rejected-l1">Rejected by L1</span>;
-    case 'REJECTED_FINANCE':
-      return <span className="badge-status badge-rejected-finance">Rejected by Finance</span>;
-    default:
-      return <span className="badge-status badge-pending-l1">{status || 'Draft'}</span>;
-  }
-}
-
-export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHistory }) {
+// Upload form for every uploading role.
+//   PM       → bill belongs to them (no PM picker); goes to their CM
+//   CM/OM/FM → must pick the PM(s) it belongs to and split the amount; CM → OM → FM chain
+//              starts at the uploader's manager. FM uploads go straight to Zoho.
+// Everyone picks the bill's location (defaults to their own) and can save a Draft first.
+export default function BillForm({ role = 'PM', initialEditBill, onClearInitialEdit, onNavigateHistory }) {
+  const assigns = role !== 'PM';                  // uploader must choose the PM(s)
+  const [myPms, setMyPms] = useState([]);         // PMs this uploader may assign to
+  const [locations, setLocations] = useState([]); // Zoho locations a bill can be for
+  const me = currentUser();                       // default location comes from the profile
   const [accounts, setA] = useState([]);
   const [taxes, setT] = useState([]);
   const [contacts, setC] = useState([]);
@@ -53,21 +47,23 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
   const [submitting, setSubmitting] = useState(false);
   // vendor → default account_id map (backed by DB)
   const [vendorAccountMap, setVendorAccountMap] = useState({});
-  // editingId: set when editing an existing bill (PENDING_L1 / rejected)
+  // editingId: set when editing an existing bill (pending / rejected)
   const [editingId, setEditingId] = useState(null);
 
-  const loadMine = () => api.get('/bills').then(r => setMine(r.data));
+  const loadMine = () => api.get('/bills', { params: { scope: 'mine' } }).then(r => setMine(r.data));
 
   // Load all contacts once on mount (full list, no search filter)
   const loadContacts = () =>
     api.get('/zoho/contacts').then(r => setC(r.data)).catch(() => { });
 
   useEffect(() => {
-    api.get('/zoho/accounts').then(r => setA(r.data)).catch(e => setMsg(errMsg(e)));
-    api.get('/zoho/taxes').then(r => setT(r.data)).catch(e => setMsg(errMsg(e)));
+    api.get('/zoho/accounts').then(r => setA(r.data)).catch(showError);
+    api.get('/zoho/taxes').then(r => setT(r.data)).catch(showError);
+    api.get('/zoho/locations').then(r => setLocations(r.data || [])).catch(showError);
     api.get('/bills/vendor-account-map').then(r => setVendorAccountMap(r.data || {})).catch(() => { });
     loadContacts();
     loadMine();
+    if (assigns) api.get('/bills/assignable-pms').then(r => setMyPms(r.data || [])).catch(showError);
   }, []);
 
   useEffect(() => {
@@ -84,7 +80,7 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
       setC(r.data);
       return r.data;
     } catch (e) {
-      setMsg(errMsg(e));
+      showError(e);
       return [];
     }
   };
@@ -201,6 +197,8 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
         discount_percent: x.discount_percent || 0,
         lineItems: items,
         accountPicked: false,
+        allocations: [],
+        location_id: me.location_id || '',   // preselected from the profile; can be changed
       });
       setEditingId(null);
       const pp = data.extractMeta?.pdfPages;
@@ -211,7 +209,8 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
       const metaHint = [pagesHint, sourceHint].filter(Boolean).join(' · ');
       setMsg(data.warning ? `Note: ${data.warning}` : [matchHint, metaHint].filter(Boolean).join(' — '));
     } catch (er) {
-      setMsg(errMsg(er));
+      setMsg('');
+      showError(er);
     } finally {
       setExtracting(false);
     }
@@ -268,31 +267,45 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
     return s + lineSubtotal * (1 + pct / 100);
   }, 0) || 0) - discountVal;
 
-  const submit = async () => {
-    if (!f.vendorId || !f.billNumber || !f.date) {
-      setMsg('Please ensure Vendor, Bill Number, and Date are all specified.');
-      return;
-    }
-    const badRate = f.lineItems.findIndex(l => !(Number(l.rate) > 0));
-    if (badRate >= 0) {
-      setMsg(`Line item ${badRate + 1}: Rate (₹) must be greater than 0. Please fill it in.`);
-      return;
+  // CM split: what's left of the bill total to allocate
+  const allocated = (f?.allocations || []).reduce((s, a) => s + (Number(a.amount) || 0), 0);
+  const allocRemaining = Math.round((total - allocated) * 100) / 100;
+  const setAlloc = (i, k, v) => setF(prev => ({ ...prev, allocations: prev.allocations.map((a, j) => (j === i ? { ...a, [k]: v } : a)) }));
+  const addAlloc = () => setF(prev => ({
+    ...prev,
+    // pre-fill the new row with whatever is still unallocated
+    allocations: [...(prev.allocations || []), { pmId: '', amount: allocRemaining > 0 ? allocRemaining : '' }],
+  }));
+  const removeAlloc = i => setF(prev => ({ ...prev, allocations: prev.allocations.filter((_, j) => j !== i) }));
+
+  // Where a submitted bill goes next, for the button and the success message
+  const nextStep = role === 'FM' ? 'Zoho Books' : `your ${ROLE_NAME[MANAGER_ROLE[role]]}`;
+
+  // draft = true → save without submitting (PMs already see their assigned amount as Draft)
+  const submit = async (draft = false) => {
+    if (!f.location_id) return showError('Select the location this bill is for.');
+    if (assigns && (!f.allocations?.length || f.allocations.some(a => !a.pmId || !(Number(a.amount) > 0))))
+      return showError('Choose the Property Manager(s) this bill belongs to, with an amount above 0 for each.');
+    if (!draft) {
+      if (!f.vendorId || !f.billNumber || !f.date) return showError('Please fill in Vendor, Bill Number and Date.');
+      const badRate = f.lineItems.findIndex(l => !(Number(l.rate) > 0));
+      if (badRate >= 0) return showError(`Line item ${badRate + 1}: Rate (₹) must be greater than 0.`);
+      if (assigns && Math.abs(allocRemaining) > 1)
+        return showError(`The assigned amounts must add up to the bill total (${inr(total)}). ${allocRemaining > 0 ? 'Still to assign' : 'Over by'}: ${inr(Math.abs(allocRemaining))}.`);
     }
     setSubmitting(true);
     const vendorName = contacts.find(c => c.contact_id === f.vendorId)?.contact_name;
     try {
-      if (editingId) {
-        await api.put(`/bills/${editingId}`, { ...f, vendorName });
-        setMsg('Bill updated successfully.');
-      } else {
-        await api.post('/bills', { ...f, vendorName });
-        setMsg('Invoice successfully submitted for L1 approval!');
-      }
+      const body = { ...f, vendorName, draft };
+      const { data } = editingId ? await api.put(`/bills/${editingId}`, body) : await api.post('/bills', body);
+      setMsg(draft ? `✓ Draft saved${assigns ? ' — the assigned Property Managers can already see it' : ''}.`
+        : data.status === 'POSTED' ? `✓ Bill #${data.billNumber} posted to Zoho Books.`
+          : `✓ Bill #${data.billNumber} submitted to ${nextStep} for approval.`);
       setF(null);
       setEditingId(null);
       loadMine();
     } catch (e) {
-      setMsg(errMsg(e));
+      showError(e);
     } finally {
       setSubmitting(false);
     }
@@ -300,7 +313,7 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
 
   // Load an existing bill into the edit form
   const editBill = async (b) => {
-    if (!['PENDING_L1', 'REJECTED_L1', 'REJECTED_FINANCE'].includes(b.status)) return;
+    if (!isEditable(b)) return showError('This bill is already being approved and can no longer be edited.');
     setMsg('');
     // Ensure contacts are loaded
     const list = contacts.length ? contacts : await searchVendors('').catch(() => []);
@@ -325,6 +338,8 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
       })),
       // existing bill with accounts already chosen → don't overwrite other lines
       accountPicked: (b.lineItems || []).some(l => l.account_id),
+      allocations: (b.allocations || []).map(a => ({ pmId: idOf(a.pmId), amount: a.amount })),
+      location_id: b.location_id || me.location_id || '',
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -333,14 +348,14 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
     if (!window.confirm(`Are you sure you want to delete bill #${b.billNumber}? You will be able to make a fresh new entry.`)) return;
     try {
       await api.delete(`/bills/${b._id}`);
-      setMsg(`✓ Bill #${b.billNumber} deleted. You can now create a new bill entry.`);
+      setMsg(`✓ Bill #${b.billNumber || ''} deleted.`);
       if (editingId === b._id) {
         setEditingId(null);
         setF(null);
       }
       loadMine();
     } catch (e) {
-      setMsg(errMsg(e));
+      showError(e);
     }
   };
 
@@ -357,7 +372,9 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
           <p className="page-description">
             {editingId
               ? 'Update bill details or fix rejected fields, then save changes to resubmit for approval.'
-              : 'Upload invoices, review AI-extracted fields, allocate line items, and submit for verification.'}
+              : role === 'FM'
+                ? 'Upload an invoice, check the AI-extracted fields and assign it to Property Managers. Your uploads post straight to Zoho Books.'
+                : `Upload an invoice, check the AI-extracted fields${assigns ? ', assign it to Property Managers' : ''}, then save a draft or submit it to ${nextStep}.`}
           </p>
         </div>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
@@ -384,8 +401,8 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
       </div>
 
       {msg && (
-        <div className={msg.includes('success') ? 'extracted-banner' : 'error-banner'} style={{ marginBottom: '1.5rem' }}>
-          {msg.includes('success') ? (
+        <div className="extracted-banner" style={{ marginBottom: '1.5rem' }}>
+          {msg.startsWith('✓') ? (
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--success)' }}>
               <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
               <polyline points="22 4 12 14.01 9 11.01"></polyline>
@@ -414,7 +431,7 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
           </div>
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', marginLeft: 'auto', marginRight: '0.75rem' }}>
             PDF pages
-            <select
+            <SearchSelect
               className="form-control"
               style={{ width: 'auto', padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
               value={pdfPages}
@@ -423,7 +440,7 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
             >
               <option value="trim">First 2 + last 2</option>
               <option value="all">All pages</option>
-            </select>
+            </SearchSelect>
           </label>
           {extracting && (
             <div className="loading-indicator" style={{ margin: 0, padding: '0.35rem 0.75rem' }}>
@@ -712,7 +729,7 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
                     label="Account"
                     opts={accounts.map(a => ({ ...a, label: a.account_name }))}
                   />
-                  <select
+                  <SearchSelect
                     className="form-control"
                     value={l.tax_percentage !== undefined && l.tax_percentage !== null ? l.tax_percentage : 0}
                     onChange={e => setLine(i, 'tax_percentage', Number(e.target.value))}
@@ -722,7 +739,7 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
                         {r}%
                       </option>
                     ))}
-                  </select>
+                  </SearchSelect>
                   <button
                     type="button"
                     className="btn-icon-danger"
@@ -788,6 +805,62 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
             </div>
           </div>
 
+          {/* Location the bill is for — preselected from the profile; its state decides GST vs IGST */}
+          {(
+            <div className="form-field" style={{ marginTop: '1.25rem', maxWidth: 420 }}>
+              <label className="form-label">Location *</label>
+              <SearchSelect className="form-control" value={f.location_id || ''} onChange={e => set('location_id', e.target.value)}>
+                <option value="">— Select Location —</option>
+                {locations.map(l => (
+                  <option key={l.location_id} value={l.location_id}>
+                    {l.location_name}{l.state_code ? ` (${l.state_code})` : ''}{l.location_id === me.location_id ? ' · my location' : ''}
+                  </option>
+                ))}
+              </SearchSelect>
+              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
+                State {locations.find(l => l.location_id === f.location_id)?.state_code || '—'} is used to pick GST (same state as vendor) or IGST.
+              </p>
+            </div>
+          )}
+
+          {/* CM / OM / FM: which PM(s) the bill belongs to, and how much each */}
+          {assigns && (
+            <div style={{ marginTop: '1.25rem', padding: '1rem', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                <h4 style={{ margin: 0, fontSize: '0.9375rem', fontWeight: 700 }}>Property Manager(s) this bill belongs to *</h4>
+                <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: Math.abs(allocRemaining) <= 1 ? 'var(--success, #22c55e)' : 'var(--warning, #f59e0b)' }}>
+                  Allocated {inr(allocated)} of {inr(total)}
+                  {Math.abs(allocRemaining) > 1 && ` · ${allocRemaining > 0 ? 'remaining' : 'over by'} ${inr(Math.abs(allocRemaining))}`}
+                  {Math.abs(allocRemaining) <= 1 && ' ✓'}
+                </span>
+              </div>
+              {myPms.length === 0 && (
+                <p style={{ fontSize: '0.8125rem', color: 'var(--warning, #f59e0b)', margin: '0 0 0.5rem' }}>
+                  No Property Managers are in your reporting line yet — ask the Admin to set up the hierarchy.
+                </p>
+              )}
+              {(f.allocations || []).map((a, i) => (
+                <div key={i} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
+                  <SearchSelect className="form-control" style={{ flex: '1 1 220px' }} value={a.pmId} onChange={e => setAlloc(i, 'pmId', e.target.value)}>
+                    <option value="">— Property Manager —</option>
+                    {myPms
+                      .filter(p => p._id === a.pmId || !f.allocations.some(x => x.pmId === p._id))
+                      .map(p => <option key={p._id} value={p._id}>{p.name}{p.location_name ? ` · ${p.location_name}` : ''}</option>)}
+                  </SearchSelect>
+                  <input
+                    className="form-control" type="number" min="0" step="0.01" placeholder="Amount ₹"
+                    style={{ flex: '0 1 160px' }} value={a.amount}
+                    onChange={e => setAlloc(i, 'amount', e.target.value)}
+                  />
+                  <button type="button" className="btn btn-outline-danger btn-sm" onClick={() => removeAlloc(i)}>✕</button>
+                </div>
+              ))}
+              <button type="button" className="btn btn-secondary btn-sm" onClick={addAlloc} disabled={myPms.length === 0}>
+                + Add Property Manager
+              </button>
+            </div>
+          )}
+
           {/* Computation and Submit CTA */}
           <div className="line-items-actions">
             <div className="computation-summary-card">
@@ -816,11 +889,22 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
               )}
             </div>
 
+            <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              style={{ padding: '0.85rem 1.25rem', fontSize: '1rem' }}
+              onClick={() => submit(true)}
+              disabled={submitting}
+              title="Save without submitting. Assigned Property Managers see it as Draft."
+            >
+              💾 Save as Draft
+            </button>
             <button
               type="button"
               className="btn btn-primary"
               style={{ padding: '0.85rem 1.75rem', fontSize: '1rem' }}
-              onClick={submit}
+              onClick={() => submit(false)}
               disabled={submitting}
             >
               {submitting ? (
@@ -830,7 +914,7 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
                 </>
               ) : (
                 <>
-                  {editingId ? 'Save Changes' : 'Submit for L1 Approval'}
+                  {role === 'FM' ? 'Post to Zoho Books' : `Submit to ${MANAGER_ROLE[role]}`}
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="5" y1="12" x2="19" y2="12"></line>
                     <polyline points="12 5 19 12 12 19"></polyline>
@@ -838,6 +922,7 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
                 </>
               )}
             </button>
+            </div>
           </div>
         </div>
       )}
@@ -894,12 +979,12 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
                       <strong style={{ color: 'var(--primary)' }}>{b.billNumber}</strong>
                     </td>
                     <td>{b.vendorName}</td>
-                    <td>{getStatusBadge(b.status)}</td>
+                    <td><StatusBadge bill={b} /></td>
                     <td style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
                       {b.history?.at(-1)?.comment || '—'}
                     </td>
                     <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                      {['PENDING_L1', 'REJECTED_L1', 'REJECTED_FINANCE'].includes(b.status) && (
+                      {isEditable(b) && (
                         <button
                           className="btn btn-secondary btn-sm"
                           onClick={() => editBill(b)}
@@ -908,7 +993,7 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
                           ✏️ Edit
                         </button>
                       )}
-                      {['REJECTED_L1', 'REJECTED_FINANCE', 'PENDING_L1'].includes(b.status) && (
+                      {isEditable(b) && (
                         <button
                           className="btn btn-outline-danger btn-sm"
                           onClick={() => deleteBill(b)}

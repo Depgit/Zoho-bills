@@ -1,78 +1,55 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { api, errMsg } from './api.js';
+import { api, showError } from './api.js';
+import { StatusBadge, isEditable, isOwner, getBillTotal, shareOf, inr, idOf } from './billUtils.jsx';
+import SearchSelect from './SearchSelect.jsx';
 
-export function getBillTotal(b) {
-  if (!b) return 0;
-  if (b.lineItems && b.lineItems.length > 0) {
-    const subtotal = b.lineItems.reduce((s, l) => s + (Number(l.rate) || 0) * (Number(l.quantity) || 1), 0);
-    const disc = Number(b.discount_amount) > 0
-      ? Number(b.discount_amount)
-      : (Number(b.discount_percent) > 0 ? (subtotal * Number(b.discount_percent) / 100) : 0);
-    const withTax = b.lineItems.reduce((s, l) => {
-      const lineSub = (Number(l.rate) || 0) * (Number(l.quantity) || 1);
-      const taxRate = Number(l.tax_percentage) || 0;
-      return s + lineSub * (1 + taxRate / 100);
-    }, 0) - disc;
-    if (withTax > 0) return withTax;
-  }
-  if (b.extracted?.total) {
-    const parsed = parseFloat(String(b.extracted.total).replace(/[^0-9.]/g, ''));
-    if (!isNaN(parsed) && parsed > 0) return parsed;
-  }
-  return 0;
+export const formatINR = inr;
+
+const pmProperty = (u = {}) => ({
+  key: idOf(u) || 'unknown',
+  name: u.location_name || u.name || 'Unknown property',
+  pm: u.name || '—',
+  state: u.source_of_supply || '',
+});
+
+// Each property's share of a bill = the PMs it is assigned to and their amounts.
+// (A PM's own bill is assigned to them in full.) A draft with nobody assigned yet → "Unassigned".
+export function propertyShares(b) {
+  if (b.allocations?.length) return b.allocations.map(a => ({ ...pmProperty(a.pmId), amount: Number(a.amount) || 0 }));
+  return [{ key: 'unassigned', name: 'Unassigned', pm: '—', state: '', amount: getBillTotal(b) }];
 }
 
-export function formatINR(val) {
-  const num = Number(val) || 0;
-  return '₹' + num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-// Property = the PM who submitted the bill (+ their location / state)
+// One label for the table: the single PM's property, or "Split · N properties"
 export function propertyOf(b) {
-  const u = b.createdBy || {};
-  return {
-    key: u._id || 'unknown',
-    name: u.location_name || u.name || 'Unknown property',
-    pm: u.name || '—',
-    state: u.source_of_supply || b.source_of_supply || '',
-  };
+  const shares = propertyShares(b);
+  if (shares.length === 1) return shares[0];
+  return { key: 'split', name: `Split · ${shares.length} properties`, pm: shares.map(p => p.pm).join(', '), state: b.source_of_supply || '' };
 }
 
-// Who approved / rejected the bill at each level, from its history
-function approvals(b) {
+// Approval trail of the current round: e.g. [CM ✓ Ravi, OM ✕ Priya]
+function trail(b) {
   const h = b.history || [];
-  const after = (from) => h.slice(from).find(x => x.action === 'APPROVED' || x.action === 'REJECTED');
-  // last submission starts the current round
-  const start = Math.max(0, h.map(x => x.action).lastIndexOf('RESUBMITTED'), h.map(x => x.action).lastIndexOf('SUBMITTED'));
-  const l1 = after(start);
-  const fin = l1 && l1.action === 'APPROVED' ? after(h.indexOf(l1) + 1) : null;
-  return { l1, fin };
+  const acts = h.map(x => x.action);
+  const start = Math.max(acts.lastIndexOf('SUBMITTED'), acts.lastIndexOf('RESUBMITTED'), 0);
+  return h.slice(start).filter(x => ['APPROVED', 'REJECTED', 'POSTED'].includes(x.action));
 }
 
-function getStatusBadge(status) {
-  switch (status) {
-    case 'PENDING_L1':
-      return <span className="badge-status badge-pending-l1">Pending L1</span>;
-    case 'PENDING_FINANCE':
-      return <span className="badge-status badge-pending-finance">Pending Finance</span>;
-    case 'POSTED':
-      return <span className="badge-status badge-posted">Passed &amp; Synced</span>;
-    case 'REJECTED_L1':
-      return <span className="badge-status badge-rejected-l1">Rejected by L1</span>;
-    case 'REJECTED_FINANCE':
-      return <span className="badge-status badge-rejected-finance">Rejected by Finance</span>;
-    default:
-      return <span className="badge-status badge-pending-l1">{status || 'In Review'}</span>;
-  }
-}
-
-export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) {
+// History for every role.
+//   PM → bills assigned to them (their amount only), including drafts others haven't submitted yet
+//   CM/OM/FM → everything for the PMs below them + bills they own or approve
+//   ADMIN → every bill; can delete any bill not yet posted
+export default function InvoiceHistory({ role = 'PM', userId, onEditBill, onNewEntry }) {
   const isPM = role === 'PM';
+  const canUpload = role !== 'ADMIN';
+  // A PM counts only their own share of a bill
+  const amountOf = b => (isPM ? shareOf(b, userId) : getBillTotal(b));
+  const canEditBill = b => isOwner(b, userId) && isEditable(b);
+  const canDeleteBill = b => b.status !== 'POSTED' && (isOwner(b, userId) || role === 'ADMIN');
   const [bills, setBills] = useState([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('ALL'); // 'ALL' | 'POSTED' | 'PENDING' | 'REJECTED'
+  const [statusFilter, setStatusFilter] = useState('ALL'); // 'ALL' | 'DRAFT' | 'POSTED' | 'PENDING' | 'REJECTED'
   const [datePreset, setDatePreset] = useState('ALL'); // 'ALL' | 'THIS_MONTH' | 'LAST_30' | 'THIS_YEAR' | 'CUSTOM'
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -89,11 +66,10 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
   const load = async () => {
     setLoading(true);
     try {
-      // L1 / Finance see every bill in the org, not just their queue
-      const { data } = await api.get('/bills', { params: isPM ? {} : { scope: 'history' } });
+      const { data } = await api.get('/bills', { params: { scope: 'history' } });
       setBills(data || []);
     } catch (e) {
-      setMsg(errMsg(e));
+      showError(e);
     } finally {
       setLoading(false);
     }
@@ -135,7 +111,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
       if (previewBill?._id === deleteTarget._id) closePreview();
       load();
     } catch (e) {
-      setMsg(errMsg(e));
+      showError(e);
     } finally {
       setDeleting(false);
     }
@@ -170,24 +146,26 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
   // KPI Calculations across all bills
   const kpis = useMemo(() => {
     const passed = bills.filter(b => b.status === 'POSTED');
-    const pending = bills.filter(b => b.status === 'PENDING_L1' || b.status === 'PENDING_FINANCE');
-    const rejected = bills.filter(b => b.status.startsWith('REJECTED'));
+    const pending = bills.filter(b => b.status === 'PENDING');
+    const rejected = bills.filter(b => b.status === 'REJECTED');
 
-    const passedAmt = passed.reduce((sum, b) => sum + getBillTotal(b), 0);
-    const pendingAmt = pending.reduce((sum, b) => sum + getBillTotal(b), 0);
-    const rejectedAmt = rejected.reduce((sum, b) => sum + getBillTotal(b), 0);
-    const totalAmt = bills.reduce((sum, b) => sum + getBillTotal(b), 0);
+    const passedAmt = passed.reduce((sum, b) => sum + amountOf(b), 0);
+    const pendingAmt = pending.reduce((sum, b) => sum + amountOf(b), 0);
+    const rejectedAmt = rejected.reduce((sum, b) => sum + amountOf(b), 0);
+    const totalAmt = bills.reduce((sum, b) => sum + amountOf(b), 0);
 
-    const pendingL1Count = bills.filter(b => b.status === 'PENDING_L1').length;
-    const pendingFinanceCount = bills.filter(b => b.status === 'PENDING_FINANCE').length;
+    const pendingAt = st => pending.filter(b => b.stage === st).length;
+    const draftCount = bills.filter(b => b.status === 'DRAFT').length;
 
     return {
       passedAmt,
       passedCount: passed.length,
       pendingAmt,
       pendingCount: pending.length,
-      pendingL1Count,
-      pendingFinanceCount,
+      pendingCm: pendingAt('CM'),
+      pendingOm: pendingAt('OM'),
+      pendingFm: pendingAt('FM'),
+      draftCount,
       rejectedAmt,
       rejectedCount: rejected.length,
       totalAmt,
@@ -195,17 +173,16 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
     };
   }, [bills]);
 
-  // Per-property summary (L1 / Finance)
+  // Per-property summary (managers / Admin). A bill counts toward each assigned PM with their share.
   const properties = useMemo(() => {
     const map = new Map();
-    for (const b of bills) {
-      const p = propertyOf(b);
-      const row = map.get(p.key) || { ...p, total: 0, posted: 0, postedAmt: 0, pending: 0, pendingAmt: 0, rejected: 0, totalAmt: 0 };
-      const amt = getBillTotal(b);
+    for (const b of bills) for (const p of propertyShares(b)) {
+      const row = map.get(p.key) || { key: p.key, name: p.name, pm: p.pm, state: p.state, total: 0, posted: 0, postedAmt: 0, pending: 0, pendingAmt: 0, rejected: 0, totalAmt: 0 };
+      const amt = p.amount;
       row.total++; row.totalAmt += amt;
       if (b.status === 'POSTED') { row.posted++; row.postedAmt += amt; }
-      else if (b.status.startsWith('PENDING')) { row.pending++; row.pendingAmt += amt; }
-      else row.rejected++;
+      else if (b.status === 'PENDING') { row.pending++; row.pendingAmt += amt; }
+      else if (b.status === 'REJECTED') row.rejected++;
       map.set(p.key, row);
     }
     return [...map.values()].sort((a, b) => b.totalAmt - a.totalAmt);
@@ -214,12 +191,13 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
   // Filter & sort bills
   const filteredBills = useMemo(() => {
     return bills.filter(b => {
-      if (propertyFilter !== 'ALL' && propertyOf(b).key !== propertyFilter) return false;
+      if (propertyFilter !== 'ALL' && !propertyShares(b).some(p => p.key === propertyFilter)) return false;
 
       // Status filter
       if (statusFilter === 'POSTED' && b.status !== 'POSTED') return false;
-      if (statusFilter === 'PENDING' && !(b.status === 'PENDING_L1' || b.status === 'PENDING_FINANCE')) return false;
-      if (statusFilter === 'REJECTED' && !b.status.startsWith('REJECTED')) return false;
+      if (statusFilter === 'PENDING' && b.status !== 'PENDING') return false;
+      if (statusFilter === 'REJECTED' && b.status !== 'REJECTED') return false;
+      if (statusFilter === 'DRAFT' && b.status !== 'DRAFT') return false;
 
       // Date filter (matches b.date, fallback to createdAt)
       const bDate = b.date || (b.createdAt ? b.createdAt.slice(0, 10) : '');
@@ -232,8 +210,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
         const numMatch = (b.billNumber || '').toLowerCase().includes(q);
         const vendorMatch = (b.vendorName || '').toLowerCase().includes(q);
         const noteMatch = (b.history?.at(-1)?.comment || '').toLowerCase().includes(q);
-        const p = propertyOf(b);
-        const propMatch = !isPM && `${p.name} ${p.pm} ${p.state}`.toLowerCase().includes(q);
+        const propMatch = !isPM && [propertyOf(b), ...propertyShares(b)].some(p => `${p.name} ${p.pm} ${p.state}`.toLowerCase().includes(q));
         if (!numMatch && !vendorMatch && !noteMatch && !propMatch) return false;
       }
       return true;
@@ -249,10 +226,10 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
         return da.localeCompare(db);
       }
       if (sortBy === 'amount-desc') {
-        return getBillTotal(b) - getBillTotal(a);
+        return amountOf(b) - amountOf(a);
       }
       if (sortBy === 'amount-asc') {
-        return getBillTotal(a) - getBillTotal(b);
+        return amountOf(a) - amountOf(b);
       }
       return 0;
     });
@@ -280,7 +257,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
             </svg>
             Refresh
           </button>
-          {isPM && <button
+          {canUpload && <button
             type="button"
             className="btn btn-primary btn-sm"
             onClick={onNewEntry}
@@ -327,7 +304,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polyline points="20 6 9 17 4 12"></polyline>
             </svg>
-            <span>Approved by Finance &amp; posted to Zoho Books</span>
+            <span>Approved by the Finance Manager &amp; posted to Zoho Books</span>
           </div>
         </div>
 
@@ -345,7 +322,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
           <div className="kpi-label">Pending Approval Amount</div>
           <div className="kpi-value kpi-val-pending">{formatINR(kpis.pendingAmt)}</div>
           <div className="kpi-meta">
-            <span>{kpis.pendingL1Count} awaiting L1 • {kpis.pendingFinanceCount} awaiting Finance</span>
+            <span>{kpis.pendingCm} at CM • {kpis.pendingOm} at OM • {kpis.pendingFm} at FM{kpis.draftCount ? ` • ${kpis.draftCount} draft` : ''}</span>
           </div>
         </div>
 
@@ -420,6 +397,13 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
             >
               ⚠️ Rejected ({kpis.rejectedCount})
             </button>
+            <button
+              type="button"
+              className={`filter-pill ${statusFilter === 'DRAFT' ? 'active' : ''}`}
+              onClick={() => setStatusFilter('DRAFT')}
+            >
+              📝 Drafts ({kpis.draftCount})
+            </button>
           </div>
 
           {/* Search Input */}
@@ -489,7 +473,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
             </div>
 
             {!isPM && (
-              <select
+              <SearchSelect
                 className="form-control"
                 value={propertyFilter}
                 onChange={e => setPropertyFilter(e.target.value)}
@@ -497,11 +481,11 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
               >
                 <option value="ALL">All Properties</option>
                 {properties.map(p => <option key={p.key} value={p.key}>{p.name}</option>)}
-              </select>
+              </SearchSelect>
             )}
 
             {/* Sort selector */}
-            <select
+            <SearchSelect
               className="form-control"
               value={sortBy}
               onChange={e => setSortBy(e.target.value)}
@@ -511,7 +495,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
               <option value="date-asc">Oldest Date First</option>
               <option value="amount-desc">Amount: High → Low</option>
               <option value="amount-asc">Amount: Low → High</option>
-            </select>
+            </SearchSelect>
 
             {hasActiveFilters && (
               <button
@@ -532,7 +516,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
         </div>
       </div>
 
-      {/* ─────────────────── BY PROPERTY (L1 / Finance) ─────────────────── */}
+      {/* ─────────────────── BY PROPERTY (managers / Admin) ─────────────────── */}
       {!isPM && properties.length > 0 && (
         <div className="card" style={{ marginBottom: '1.25rem' }}>
           <div className="card-header">
@@ -609,7 +593,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
             <p style={{ maxWidth: '420px', margin: '0 auto 1.25rem auto' }}>
               {hasActiveFilters
                 ? 'No bills match your current filters. Try changing or resetting the date or status filters.'
-                : isPM ? 'You have not uploaded any bills yet. Click below to submit your first invoice.' : 'No bills have been submitted yet.'}
+                : canUpload ? 'You have not uploaded any bills yet. Click below to submit your first invoice.' : 'No bills have been submitted yet.'}
             </p>
             {hasActiveFilters ? (
               <button
@@ -619,7 +603,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
               >
                 Clear Filters
               </button>
-            ) : isPM && (
+            ) : canUpload && (
               <button type="button" className="btn btn-primary" onClick={onNewEntry}>
                 + Upload New Bill
               </button>
@@ -636,20 +620,19 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
                   <th>Bill Date</th>
                   <th>Calculated Total</th>
                   <th>Status</th>
-                  {!isPM && <th>Approved By</th>}
+                  {!isPM && <th>Approval Trail</th>}
                   <th>Review Note / Feedback</th>
                   <th style={{ textAlign: 'right' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredBills.map(b => {
-                  const billTotal = getBillTotal(b);
-                  const isRejected = b.status.startsWith('REJECTED');
-                  const canDelete = isPM && (isRejected || b.status === 'PENDING_L1');
-                  const canEdit = isPM && (isRejected || b.status === 'PENDING_L1');
+                  const billTotal = amountOf(b);
+                  const isRejected = b.status === 'REJECTED';
+                  const canEdit = canEditBill(b);
+                  const canDelete = canDeleteBill(b);
                   const prop = propertyOf(b);
-                  const { l1, fin } = approvals(b);
-                  const who = (x) => x ? `${x.action === 'APPROVED' ? '✓' : '✕'} ${x.by}${x.at ? ` · ${new Date(x.at).toLocaleDateString('en-IN')}` : ''}` : '—';
+                  const steps = trail(b);
                   const latestNote = b.history?.at(-1)?.comment;
 
                   return (
@@ -715,11 +698,16 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
                           </div>
                         )}
                       </td>
-                      <td>{getStatusBadge(b.status)}</td>
+                      <td><StatusBadge bill={b} /></td>
                       {!isPM && (
                         <td style={{ fontSize: '0.8125rem', whiteSpace: 'nowrap' }}>
-                          <div>L1: {who(l1)}</div>
-                          <div>Finance: {who(fin)}</div>
+                          {steps.length === 0 && <span style={{ color: 'var(--text-muted)' }}>{b.status === 'DRAFT' ? 'Not submitted' : '—'}</span>}
+                          {steps.map((x, i) => (
+                            <div key={i}>
+                              {x.role} {x.action === 'REJECTED' ? '✕' : '✓'} {x.by}
+                              {x.at ? <span style={{ color: 'var(--text-muted)' }}> · {new Date(x.at).toLocaleDateString('en-IN')}</span> : ''}
+                            </div>
+                          ))}
                         </td>
                       )}
                       <td style={{ maxWidth: '280px' }}>
@@ -781,7 +769,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
                           )}
 
                           {/* If rejected, also show quick 'New Entry' */}
-                          {isPM && isRejected && (
+                          {canEdit && isRejected && (
                             <button
                               type="button"
                               className="btn btn-primary btn-sm"
@@ -811,7 +799,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                   <h3 style={{ margin: 0, fontSize: '1.25rem' }}>Bill #{previewBill.billNumber}</h3>
-                  {getStatusBadge(previewBill.status)}
+                  <StatusBadge bill={previewBill} />
                 </div>
                 <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>
                   Vendor: <strong>{previewBill.vendorName}</strong> • Date: {previewBill.date || '—'}
@@ -905,6 +893,21 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
                 </div>
               )}
 
+              {/* CM split bill: share per Property Manager */}
+              {previewBill.allocations?.length > 0 && (
+                <div style={{ marginBottom: '1rem' }}>
+                  <h4 style={{ fontSize: '0.875rem', fontWeight: 700, margin: '0 0 0.5rem' }}>
+                    Property Manager(s) · uploaded by {previewBill.createdBy?.name || '—'} ({previewBill.createdBy?.role || '?'})
+                  </h4>
+                  {previewBill.allocations.map((al, i) => (
+                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem', padding: '0.2rem 0' }}>
+                      <span>{al.pmId?.name || '—'}{al.pmId?.location_name ? ` · ${al.pmId.location_name}` : ''}</span>
+                      <strong>{formatINR(al.amount)}</strong>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* Audit history */}
               {previewBill.history && previewBill.history.length > 0 && (
                 <div style={{ marginBottom: '1.25rem' }}>
@@ -947,7 +950,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
             </div>
 
             <div className="history-modal-footer">
-              {isPM && previewBill.status.startsWith('REJECTED') && (
+              {canEditBill(previewBill) && previewBill.status === 'REJECTED' && (
                 <>
                   <button
                     type="button"
@@ -1018,7 +1021,7 @@ export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) 
 
             <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '1.25rem', lineHeight: 1.5 }}>
               Are you sure you want to permanently delete this bill? The uploaded invoice file will be removed from the server.
-              {deleteTarget.status.startsWith('REJECTED') && ' You will then be able to make a clean, fresh entry.'}
+              {deleteTarget.status === 'REJECTED' && ' You will then be able to make a clean, fresh entry.'}
             </p>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>

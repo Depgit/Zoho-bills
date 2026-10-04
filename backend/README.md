@@ -1,35 +1,59 @@
 # Backend — Zoho Bill Approvals
 
-Node + Express + MongoDB (Mongoose). Property Managers upload vendor bills, an AI
-extracts the fields, L1 and Finance approve, and the bill is posted to Zoho Books
-with the file attached.
+Node + Express + MongoDB (Mongoose). Managers upload vendor bills, an AI extracts the
+fields, the bill climbs an approval chain, and the Finance Manager's approval posts it to
+Zoho Books with the file attached.
+
+## Hierarchy
+
+```
+ADMIN (exactly one per org, created at registration) — users, roles, reporting lines, transfers, all bills
+FM  Finance Manager      ── final approver; approval posts to Zoho
+ └─ OM  Operations Manager
+     └─ CM  Cluster Manager
+         └─ PM  Property Manager
+```
+Many FMs, OMs, CMs and PMs. Every PM, CM and OM has `managerId`, pointing at a user of the role directly above (`hierarchy.js`).
 
 ## Workflow
 
 ```
-PM uploads file ──► /bills/extract ──► OCR + AI ──► form pre-filled
-                                       file saved in GridFS
-PM submits      ──► POST /bills                 status PENDING_L1
-L1 approve      ──► POST /bills/:id/approve     status PENDING_FINANCE
-Finance approve ──► POST /bills/:id/approve     tax slab auto-picked
-                                                → bill created in Zoho
-                                                → file attached in Zoho, deleted from GridFS
-                                                status POSTED
-Either rejects  ──► POST /bills/:id/reject      status REJECTED_L1 / REJECTED_FINANCE
-                                                (file kept so the PM can fix it)
-PM edits        ──► PUT /bills/:id              back to PENDING_L1 (can swap the file)
+upload file ──► POST /bills/extract ──► OCR + AI ──► form pre-filled (file saved in GridFS)
+save draft  ──► POST /bills {draft:true}   status DRAFT (assigned PMs already see it)
+submit      ──► POST /bills | PUT /bills/:id
+                  PM → waits on their CM │ CM → their OM │ OM → their FM │ FM → posted to Zoho now
+approve     ──► POST /bills/:id/approve  at CM/OM: moves to that approver's own manager
+                                         at FM: tax slab auto-picked → Zoho bill + attachment → POSTED
+reject      ──► POST /bills/:id/reject   REJECTED (stage = who rejected) → back to the owner
+owner edits ──► PUT /bills/:id           resubmitting restarts the chain from the owner's level
 ```
+
+- **Assigning PMs:** every bill has `allocations [{ pmId, amount }]`, and the amounts add up to the bill total.
+  - A PM's own bill is assigned to them in full.
+  - A CM, OM or FM must pick one or more PMs below them in the hierarchy and split the amount.
+- **Location:** chosen on the form, preselected from the uploader's default location. Its state decides GST vs IGST.
+- **Ownership:** `createdBy` is who uploaded the bill (kept for the record). `ownerId` is who can edit and resubmit it, and it moves when the Admin transfers a workload.
+- **Who can edit:** the owner can edit a draft, a rejected bill, or a pending bill nobody has approved yet.
 
 ### Roles
 
-| Role | Who | Can |
-|---|---|---|
-| `FINANCE` | Registers with Zoho credentials; owns one **FinanceOrg** | Approve or reject PENDING_FINANCE bills, manage PM/L1 users, sync Zoho contacts |
-| `L1` | Created by Finance | Approve or reject PENDING_L1 bills |
-| `PM` | Property Manager, created by Finance with a **state** and **location** | Upload, submit, edit, resubmit and delete their own bills |
+| Role | Can |
+|---|---|
+| `ADMIN` | Create users; change anyone's role, reporting line and default location; transfer a CM/OM/FM workload; see all bills; approve or reject any pending bill on behalf of whoever it waits on; delete any bill not yet posted |
+| `FM` | Approve or reject bills waiting on them (approval posts to Zoho); upload bills that post to Zoho straight away |
+| `OM`, `CM` | Approve or reject bills waiting on them; upload bills that start at their own manager |
+| `PM` | Upload their own bills; see every bill assigned to them, including drafts |
 
-Every user and bill belongs to one FinanceOrg (`financeOrgId`), and all queries are
-scoped to it. Each FinanceOrg has its own Zoho credentials.
+### Admin: changing the hierarchy
+- **Changing someone's manager** (`PATCH /admin/users/:id { managerId }`): their own bills still waiting on the old manager move to the new one.
+- **Changing someone's role:** blocked while anything is still assigned to them (people reporting to them, pending approvals, open bills they own, or open bills assigned to them). Transfer that work first.
+- **Transferring a workload** (`POST /admin/users/:id/transfer { toUserId }`): only CM, OM or FM, and only to another user with the same role. It moves:
+  - bills waiting on their approval (`approverId`)
+  - the people who report to them (`managerId`)
+  - every bill they own (`ownerId`)
+
+  Afterwards the old user has nothing assigned and can be deleted.
+- **Deleting a user:** only allowed once nothing is assigned to them.
 
 ## Files
 
@@ -37,41 +61,56 @@ scoped to it. Each FinanceOrg has its own Zoho credentials.
 |---|---|
 | `server.js` | Global TLS patch (for MongoDB/Zoho on Render), Express setup, Mongo connect, Zoho contact sync on start, hourly cleanup of unused uploaded files |
 | `models.js` | Mongoose models: `FinanceOrg`, `User`, `Bill`, `Contact`, `VendorAccountMap` |
-| `mw.js` | `auth(...roles)`: checks the JWT and the user's role |
-| `routes/auth.js` | Register Finance, log in, list/create/delete users |
-| `routes/bills.js` | Bill lifecycle: extract, submit, edit, delete, list, view file, approve/reject |
+| `mw.js` | `auth(...roles)` checks the JWT and the user's role. `h()` wraps async routes, and `httpError(status, msg)` sends errors to the JSON error handler |
+| `hierarchy.js` | Roles, who reports to whom (`MANAGER_ROLE`), and the PMs below a user (`assignablePms`) |
+| `routes/auth.js` | Register an organisation (creates its one Admin), log in |
+| `routes/admin.js` | Admin only: list, create, update and delete users, and transfer workloads |
+| `routes/bills.js` | Bill lifecycle: extract, draft or submit, edit, delete, list (queue, history, mine), view file, approve/reject, post to Zoho |
 | `routes/zoho.js` | Zoho data for the UI (accounts, taxes, contacts, locations), cached 5 min per org |
 | `zoho.js` | Zoho Books API client: OAuth token per org, contact sync, `createBill`, `attach` |
 | `extract.js` | Bill reading: OCR + AI extraction |
 | `files.js` | GridFS file storage (save, read, stream, delete, find unused) |
 | `gst.js` | GSTIN → state table and the GST vs IGST rule (`taxPlan`) |
-| `learn.js` | Learns from PM corrections: extraction log, vendor memory, few-shot examples (`ExtractionLog` collection) |
+| `learn.js` | Learns from uploaders' corrections: extraction log, vendor memory, few-shot examples (`ExtractionLog` collection) |
 | `data/extract-store.json` | Extraction cache (by file hash and by GSTIN + invoice number) |
 
 ## API
 
 All routes except register and login need `Authorization: Bearer <jwt>`.
 
+**Errors:** every error comes back as `{ error: "message" }` with an HTTP status, and the frontend shows it in a popup. Routes throw `httpError(status, msg)`, and the error handler in `server.js` turns it into JSON.
+
 **Auth** (`/api/auth`)
-- `POST /register-finance`: create a Finance user and FinanceOrg (checks the Zoho credentials)
-- `POST /login`: returns `{ token, user }`. The JWT holds `id, name, role, financeOrgId` and lasts 12h.
-- `GET /users`, `POST /users`, `DELETE /users/:id` (FINANCE): manage the org's PM and L1 users
+- `POST /register`: creates the organisation's Admin and FinanceOrg (checks the Zoho credentials). Each Zoho organisation can be registered once.
+- `POST /login`: returns `{ token, user }`. `user` includes `role`, `managerId` and the default location. The token lasts 12h.
+
+**Admin** (`/api/admin`, ADMIN only)
+- `GET /users`: everyone in the org, with `managerId` populated and their open `workload`.
+- `POST /users`: `{ name, email, password, role: PM|CM|OM|FM, managerId, location_id }`. PM, CM and OM need a `managerId` of the role above. A PM needs a location; for other roles it's optional.
+- `PATCH /users/:id`: `{ role?, managerId?, location_id? }`.
+- `POST /users/:id/transfer`: `{ toUserId }`.
+- `DELETE /users/:id`.
 
 **Bills** (`/api/bills`)
-- `POST /extract` (PM): multipart `file` (PDF or image, max 10 MB), optional `pages=all`. Returns `{ pdfFile, fileType, extracted, extractMeta }`.
-- `POST /` (PM): submit a bill. Needs a valid `pdfFile`, vendor, bill number, date, and line items each with an account, rate > 0 and qty > 0. A duplicate vendor + bill number returns 409.
-- `PUT /:id` (PM): edit a PENDING_L1 or rejected bill; sets it back to PENDING_L1. A new `pdfFile` replaces the old one.
-- `DELETE /:id` (PM): delete a bill that isn't POSTED.
-- `GET /`:
-  - PM: their own bills.
-  - L1/Finance: their queue.
-  - L1/Finance with `?scope=history`: every bill in the org.
-  - Each bill comes back with `vendorGstin` and `taxInfo`.
-- `GET /:id/pdf`: stream the bill's file from GridFS.
-- `POST /:id/approve | /:id/reject` (L1, FINANCE): rejecting needs a `comment`. When Finance approves, the bill is posted to Zoho.
-- `GET/POST /vendor-account-map` (PM): remembers the PM's default expense account for each vendor.
+- `POST /extract` (PM, CM, OM, FM): multipart `file` (PDF or image, max 10 MB), optional `pages=all`. Returns `{ pdfFile, fileType, extracted, extractMeta }`.
+- `GET /assignable-pms`: the PMs I can assign a bill to.
+- `POST /`: create a bill from `{ pdfFile, ...fields, location_id, allocations, draft }`.
+  - `draft: true` saves it as a DRAFT, which only needs the file and a location.
+  - Otherwise it's submitted. That needs the vendor, bill number, date and valid lines, the allocations must add up to within ₹1 of the total, and the bill number must be unique for the vendor.
+- `PUT /:id`: the owner edits the bill, with the same body; `draft` decides whether it's resubmitted.
+- `DELETE /:id`: the owner or the Admin deletes a bill that isn't POSTED.
+- `GET /?scope=`: each bill is returned with `vendorGstin` and `taxInfo`, and with the people on it populated.
+  - `queue` (default): bills waiting on me. For the Admin, all pending bills.
+  - `history`: everything I can see. For a PM, bills assigned to them or owned by them. For a CM, OM or FM, bills assigned to any PM below them, bills they own, bills waiting on them, or bills they acted on. For the Admin, every bill.
+  - `mine`: bills I own.
+- `GET /:id/pdf`: the bill's file, if I can see the bill.
+- `POST /:id/approve | /:id/reject`: only the approver the bill waits on, or the Admin. Rejecting needs a `comment`. At FM, `lineItems[].tax_id` can override the tax slabs.
+- `GET/POST /vendor-account-map`: remembers the uploader's default expense account for each vendor.
 
-**Zoho** (`/api/zoho`): `GET /accounts`, `/taxes`, `/contacts?search=`, `/locations`, and `POST /sync` (re-sync vendor contacts).
+**Zoho** (`/api/zoho`):
+- `GET /accounts`, `/contacts?search=`: uploaders only.
+- `GET /taxes`, `/locations`: any logged-in user. Each location has a resolved `state_code`.
+- `POST /sync`: Admin or FM; re-syncs vendor contacts.
 
 ## Key logic
 
@@ -98,21 +137,21 @@ No model training. Each extraction is logged, then compared with what the PM act
 ### File storage (`files.js`)
 - Files are stored in MongoDB GridFS (bucket `billFiles`), and `Bill.pdfFile` holds the GridFS id. Local disk on Render is wiped on every deploy, which is why files aren't kept there.
 - **When files are deleted:**
-  - When the PM deletes the bill.
+  - When the owner or the Admin deletes the bill.
   - After the file is attached in Zoho.
   - By the hourly cleanup, if it's over 1 hour old and no bill uses it.
-- Rejected and pending bills keep their file.
+- Draft, pending and rejected bills keep their file.
 - **Bill data is never deleted automatically.** Only the file is.
 
 ### Tax: GST vs IGST (`gst.js`)
 - **Vendor state:** the first 2 digits of the vendor GSTIN. The GSTIN comes from the Zoho contact, or from the extracted data if Zoho has none.
-- **Property state:** the PM's `source_of_supply`, set by the admin. `DL`, `07` and `Delhi` all work.
+- **Property state:** the `source_of_supply` of the location picked on the bill, which defaults to the uploader's own location. The backend looks the location up in Zoho and takes the state from it: `address.state_code` (e.g. `HR`), else the first 2 digits of the location's GSTIN (`tax_reg_no`), else the state name. It never trusts the request body for the state.
 - **The rule:**
   - Same state: GST slab (CGST + SGST).
   - Different states: IGST slab.
   - In both cases the slab is matched to the line's `tax_percentage`.
   - No vendor GSTIN, or 0%: no tax slab.
-- When Finance approves, slabs are filled in automatically. Finance can override them. Approval is blocked only when the slab can't be worked out.
+- At FM approval (or an FM's own upload), slabs are filled in automatically. The FM can override them during approval. Posting is blocked only when the slab can't be worked out.
 
 ### Posting to Zoho (`zoho.createBill`)
 - **States:**
@@ -126,8 +165,11 @@ No model training. Each extraction is logged, then compared with what the PM act
 
 ## Bill statuses
 
-`PENDING_L1 → PENDING_FINANCE → POSTED`, or `REJECTED_L1` / `REJECTED_FINANCE`. A rejected bill goes back to `PENDING_L1` when the PM edits it.
-`Bill.history[]` records every action as `{ by, action, comment, at }`. The actions are SUBMITTED, EDITED, RESUBMITTED, APPROVED and REJECTED.
+`DRAFT → PENDING (stage CM → OM → FM, waiting on approverId) → POSTED`, or `REJECTED` (stage = the level that rejected).
+- **Starting point:** a bill enters the chain at the stage above its owner (`firstStage`), and an FM's own bill posts to Zoho immediately.
+- **Approving:** each approval moves the bill to the current approver's own manager. If that manager is missing, approval fails with a message to ask the Admin.
+- **History:** `Bill.history[]` records `{ by, byId, role, action, comment, at }`. The actions are DRAFT_SAVED, SUBMITTED, RESUBMITTED, APPROVED, REJECTED and POSTED.
+- **Allocations:** used in the app only (history and analytics per property). Zoho gets one bill.
 
 ## Environment (`.env`)
 

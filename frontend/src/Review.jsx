@@ -1,22 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { api, errMsg } from './api.js';
-
-function getStatusBadge(status) {
-  switch (status) {
-    case 'PENDING_L1':
-      return <span className="badge-status badge-pending-l1">Pending L1</span>;
-    case 'PENDING_FINANCE':
-      return <span className="badge-status badge-pending-finance">Pending Finance</span>;
-    case 'POSTED':
-      return <span className="badge-status badge-posted">Posted to Zoho</span>;
-    case 'REJECTED_L1':
-      return <span className="badge-status badge-rejected-l1">Rejected by L1</span>;
-    case 'REJECTED_FINANCE':
-      return <span className="badge-status badge-rejected-finance">Rejected by Finance</span>;
-    default:
-      return <span className="badge-status badge-pending-l1">{status || 'In Review'}</span>;
-  }
-}
+import { api, showError } from './api.js';
+import { StatusBadge, ROLE_NAME, inr } from './billUtils.jsx';
+import SearchSelect from './SearchSelect.jsx';
 
 const isIgst = t => t.tax_specific_type === 'igst' || /igst/i.test(t.tax_name || '');
 
@@ -52,7 +37,7 @@ export default function Review({ role }) {
     setLoading(true);
     api.get('/bills')
       .then(r => setBills(r.data))
-      .catch(e => setMsg(errMsg(e)))
+      .catch(showError)
       .finally(() => setLoading(false));
   };
 
@@ -66,12 +51,12 @@ export default function Review({ role }) {
   const interState = sel?.taxInfo?.interState ?? null;
   // Taxes may arrive after a bill is opened → fill its slabs then
   useEffect(() => {
-    if (role === 'FINANCE' && taxes.length) setSel(prev => (prev?.status === 'PENDING_FINANCE' ? autoSlabs(prev, taxes) : prev));
+    if (taxes.length) setSel(prev => (prev?.stage === 'FM' ? autoSlabs(prev, taxes) : prev));
   }, [taxes]);
 
   const open = async b => {
     const cloned = JSON.parse(JSON.stringify(b));
-    setSel(isFinance && cloned.status === 'PENDING_FINANCE' ? autoSlabs(cloned, taxes) : cloned);
+    setSel(cloned.stage === 'FM' ? autoSlabs(cloned, taxes) : cloned);
     setMsg('');
     setComment('');
     setPdf(null);
@@ -96,18 +81,18 @@ export default function Review({ role }) {
 
   const getTaxName = (taxId) => {
     const found = taxes.find(t => t.tax_id === taxId);
-    return found ? `${found.tax_name} (${found.tax_percentage}%)` : (taxId || 'Pending Finance');
+    return found ? `${found.tax_name} (${found.tax_percentage}%)` : (taxId || 'Set at FM approval');
   };
 
   const act = async a => {
     if (a === 'reject' && !comment.trim()) {
-      setMsg('Rejection comment is required to return the bill.');
+      showError('Write a reason for rejecting — it goes back to the bill owner.');
       return;
     }
-    if (a === 'approve' && isFinance) {
+    if (a === 'approve' && atFM) {
       const missingIndex = sel.lineItems.findIndex(l => needsSlab(sel, l) && !l.tax_id);
       if (missingIndex >= 0) {
-        setMsg(`Please select a Zoho Tax Slab for line item ${missingIndex + 1} ("${sel.lineItems[missingIndex].name || 'Item'}") before approving.`);
+        showError(`Please select a Zoho Tax Slab for line item ${missingIndex + 1} ("${sel.lineItems[missingIndex].name || 'Item'}") before approving.`);
         return;
       }
     }
@@ -115,18 +100,21 @@ export default function Review({ role }) {
     try {
       await api.post(`/bills/${sel._id}/${a}`, {
         comment,
-        ...(isFinance && a === 'approve' ? { lineItems: sel.lineItems } : {})
+        ...(atFM && a === 'approve' ? { lineItems: sel.lineItems } : {})
       });
       setSel(null);
       setMsg('');
       load();
     } catch (e) {
-      setMsg(errMsg(e));
+      setMsg('');
+      showError(e);
     }
   };
 
-  const isFinance = role === 'FINANCE';
-  const queueTitle = isFinance ? 'Finance Review Queue' : 'L1 Verification Queue';
+  const isAdmin = role === 'ADMIN';
+  // The selected bill is at the last step: approving posts it to Zoho (tax slabs needed)
+  const atFM = sel?.stage === 'FM';
+  const queueTitle = isAdmin ? 'All Pending Bills' : `Waiting on you (${role})`;
 
   const filteredBills = bills.filter(b => {
     const q = filterText.toLowerCase();
@@ -141,11 +129,13 @@ export default function Review({ role }) {
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">{isFinance ? 'Finance Approval & Zoho Sync' : 'L1 Review Portal'}</h1>
+          <h1 className="page-title">{isAdmin ? 'All Pending Approvals' : `${ROLE_NAME[role]} Approvals`}</h1>
           <p className="page-description">
-            {isFinance
-              ? 'Perform final audit on tax codes, invoice rates, and post approved bills directly to Zoho Books.'
-              : 'Inspect incoming vendor bills, line item coding, and verify match against attached invoices.'}
+            {isAdmin
+              ? 'Every bill waiting in the chain. As Admin you can approve or reject on behalf of whoever it waits on.'
+              : role === 'FM'
+                ? 'Final check: confirm tax slabs and amounts, then approve to post the bill to Zoho Books.'
+                : `Bills waiting on you. Approving sends them to your ${ROLE_NAME[{ CM: 'OM', OM: 'FM' }[role]] || 'manager'}; rejecting returns them to the owner.`}
           </p>
         </div>
         <button className="btn btn-secondary btn-sm" onClick={load} disabled={loading}>
@@ -159,7 +149,7 @@ export default function Review({ role }) {
       </div>
 
       {msg && (
-        <div className="error-banner" style={{ marginBottom: '1.25rem' }}>
+        <div className="extracted-banner" style={{ marginBottom: '1.25rem' }}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="10"></circle>
             <line x1="12" y1="8" x2="12" y2="12"></line>
@@ -207,7 +197,7 @@ export default function Review({ role }) {
                 >
                   <div className="queue-item-top">
                     <span className="queue-item-bill-no">{b.billNumber}</span>
-                    {getStatusBadge(b.status)}
+                    <StatusBadge bill={b} />
                   </div>
                   <div className="queue-item-vendor">{b.vendorName || 'Unnamed Vendor'}</div>
                   <div className="queue-item-submitter">
@@ -215,8 +205,11 @@ export default function Review({ role }) {
                       <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
                       <circle cx="12" cy="7" r="4"></circle>
                     </svg>
-                    Submitted by {b.createdBy?.name || 'PM'}
+                    By {b.ownerId?.name || b.createdBy?.name || '—'} ({b.ownerId?.role || b.createdBy?.role || '?'}){b.location_name ? ` · ${b.location_name}` : ''}
                   </div>
+                  {isAdmin && b.approverId?.name && (
+                    <div className="queue-item-submitter">Waiting on {b.approverId.name} ({b.stage})</div>
+                  )}
                 </div>
               ))
             )}
@@ -232,7 +225,7 @@ export default function Review({ role }) {
                 <h3>{sel.billNumber}</h3>
                 <span className="detail-vendor-name">{sel.vendorName}</span>
               </div>
-              <div>{getStatusBadge(sel.status)}</div>
+              <div><StatusBadge bill={sel} /></div>
             </div>
 
             {/* Metadata Chips */}
@@ -266,7 +259,7 @@ export default function Review({ role }) {
             </div>
 
             {/* Tax type: vendor GSTIN state vs property (PM) state — decided automatically */}
-            {isFinance && sel.taxInfo && (
+            {atFM && sel.taxInfo && (
               <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '1rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
                 <span>Vendor GSTIN: <b>{sel.vendorGstin || 'none'}</b>{sel.taxInfo.vendor && ` (${sel.taxInfo.vendor})`}</span>
                 <span>Property state: <b>{sel.taxInfo.property || sel.source_of_supply || 'not set'}</b></span>
@@ -278,13 +271,36 @@ export default function Review({ role }) {
               </div>
             )}
 
+            {/* Which PM(s) the bill belongs to and their amounts */}
+            {sel.allocations?.length > 0 && (
+              <div style={{ marginBottom: '1rem' }}>
+                <h4 style={{ fontSize: '0.875rem', fontWeight: 700, margin: '0 0 0.5rem', color: 'var(--text-secondary)' }}>
+                  Property Manager(s) · uploaded by {sel.createdBy?.name || '—'} ({sel.createdBy?.role || '?'})
+                </h4>
+                <div className="table-responsive">
+                  <table className="custom-table">
+                    <thead><tr><th>Property Manager</th><th>Property</th><th style={{ textAlign: 'right' }}>Amount</th></tr></thead>
+                    <tbody>
+                      {sel.allocations.map((a, i) => (
+                        <tr key={i}>
+                          <td style={{ fontWeight: 600 }}>{a.pmId?.name || '—'}</td>
+                          <td>{a.pmId?.location_name || '—'}</td>
+                          <td style={{ textAlign: 'right' }}>{inr(a.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
             {/* Line Items Breakdown */}
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
                 <h4 style={{ fontSize: '0.875rem', fontWeight: 700, margin: 0, color: 'var(--text-secondary)' }}>
                   Line Items Allocation
                 </h4>
-                {isFinance && sel.status === 'PENDING_FINANCE' && (
+                {atFM && (
                   <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                     * Tax slab is picked automatically — change it only if needed
                   </span>
@@ -326,10 +342,10 @@ export default function Review({ role }) {
                             </span>
                           </td>
                           <td>
-                            {isFinance && sel.status === 'PENDING_FINANCE' && !needsSlab(sel, l) ? (
+                            {atFM && !needsSlab(sel, l) ? (
                               <span style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>No GST</span>
-                            ) : isFinance && sel.status === 'PENDING_FINANCE' ? (
-                              <select
+                            ) : atFM ? (
+                              <SearchSelect
                                 className="form-control"
                                 style={{
                                   fontSize: '0.8125rem',
@@ -357,7 +373,7 @@ export default function Review({ role }) {
                                     </option>
                                   ))}
                                 </optgroup>
-                              </select>
+                              </SearchSelect>
                             ) : (
                               <span style={{ fontFamily: 'monospace', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
                                 {getTaxName(l.tax_id)}
@@ -437,7 +453,7 @@ export default function Review({ role }) {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="20 6 9 17 4 12"></polyline>
                 </svg>
-                {isFinance ? 'Approve & Post to Zoho Books' : 'Approve Bill'}
+                {atFM ? 'Approve & Post to Zoho Books' : `Approve → ${{ CM: 'OM', OM: 'FM' }[sel.stage] || 'next'}`}
               </button>
             </div>
           </div>

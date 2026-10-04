@@ -137,10 +137,17 @@ export const accounts = async (org) => (await z(org, 'get', '/chartofaccounts',
   .map(a => ({ account_id: a.account_id, account_name: a.account_name }));
 
 export const taxes = async (org) => (await z(org, 'get', '/settings/taxes', { params: { per_page: 200 } })).taxes
-  .map(t => ({ tax_id: t.tax_id, tax_name: t.tax_name, tax_percentage: t.tax_percentage }));
+  .map(t => ({ tax_id: t.tax_id, tax_name: t.tax_name, tax_percentage: t.tax_percentage, tax_specific_type: t.tax_specific_type || '' }));
 
+// state_code ('HR') decides GST vs IGST for bills from this location:
+// address.state_code, else the location's GSTIN (tax_reg_no) state digits, else the state name
 export const locations = async (org) => (await z(org, 'get', '/locations')).locations
-  .map(l => ({ location_id: l.location_id, location_name: l.location_name }));
+  .filter(l => l.is_location_active !== false)
+  .map(l => ({
+    location_id: l.location_id,
+    location_name: l.location_name,
+    state_code: stateCode(l.address?.state_code) || gstinState(l.tax_reg_no)?.code || stateCode(l.address?.state) || '',
+  }));
 
 // Zoho needs an account to book a bill-level discount into — use the org's
 // account named "Discount" (cached per org)
