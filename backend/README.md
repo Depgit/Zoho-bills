@@ -13,7 +13,7 @@ FM  Finance Manager      ── final approver; approval posts to Zoho
      └─ CM  Cluster Manager
          └─ PM  Property Manager
 ```
-Many FMs, OMs, CMs and PMs. Every PM, CM and OM has `managerId`, pointing at a user of the role directly above (`hierarchy.js`).
+Many FMs, OMs, CMs and PMs. Every PM, CM and OM has `managerId`, pointing at a user of the role directly above (`services/hierarchy.service.js`).
 
 ## Workflow
 
@@ -57,28 +57,53 @@ owner edits ──► PUT /bills/:id           resubmitting restarts the chain f
 
 ## Files
 
-| File | What it does |
+Each file does one job. `server.js` at the root only imports `src/server.js`.
+
+```
+src/
+  server.js          start-up: Mongo connect, listen, run the jobs
+  app.js             Express setup: CORS, JSON, /api routes, error handler
+  config/            env.js (loads .env), tls.js (global TLS patch for Render), db.js (Mongo connect)
+  models/            one Mongoose model per file + index.js
+  middleware/        auth, asyncHandler, errorHandler, loadOrg, upload (multer)
+  utils/             httpError, ids
+  routes/            URL → controller only (index, auth, admin, bills, zoho)
+  controllers/       request in, response out; the work is done in services/
+  services/          business logic (below)
+  jobs/              cleanupOrphanFiles (hourly), syncContacts (on start)
+```
+
+| Path | What it does |
 |---|---|
-| `server.js` | Global TLS patch (for MongoDB/Zoho on Render), Express setup, Mongo connect, Zoho contact sync on start, hourly cleanup of unused uploaded files |
-| `models.js` | Mongoose models: `FinanceOrg`, `User`, `Bill`, `Contact`, `VendorAccountMap` |
-| `mw.js` | `auth(...roles)` checks the JWT and the user's role. `h()` wraps async routes, and `httpError(status, msg)` sends errors to the JSON error handler |
-| `hierarchy.js` | Roles, who reports to whom (`MANAGER_ROLE`), and the PMs below a user (`assignablePms`) |
-| `routes/auth.js` | Register an organisation (creates its one Admin), log in |
-| `routes/admin.js` | Admin only: list, create, update and delete users, and transfer workloads |
-| `routes/bills.js` | Bill lifecycle: extract, draft or submit, edit, delete, list (queue, history, mine), view file, approve/reject, post to Zoho |
-| `routes/zoho.js` | Zoho data for the UI (accounts, taxes, contacts, locations), cached 5 min per org |
-| `zoho.js` | Zoho Books API client: OAuth token per org, contact sync, `createBill`, `attach` |
-| `extract.js` | Bill reading: OCR + AI extraction |
-| `files.js` | GridFS file storage (save, read, stream, delete, find unused) |
-| `gst.js` | GSTIN → state table and the GST vs IGST rule (`taxPlan`) |
-| `learn.js` | Learns from uploaders' corrections: extraction log, vendor memory, few-shot examples (`ExtractionLog` collection) |
+| `models/` | `FinanceOrg`, `User`, `Bill`, `Contact`, `VendorAccountMap`, `ExtractionLog` |
+| `middleware/auth.js` | `auth(...roles)` checks the JWT and the user's role |
+| `middleware/asyncHandler.js` | Wraps async routes so thrown errors reach the error handler |
+| `middleware/errorHandler.js` | Turns every error into `{ error: "message" }` JSON |
+| `middleware/loadOrg.js` | Loads the user's `FinanceOrg` (Zoho credentials) onto the request |
+| `utils/httpError.js` | `httpError(status, msg)` creates an error with an HTTP status |
+| `controllers/auth.controller.js` | Register an organisation (creates its one Admin), log in |
+| `controllers/admin.controller.js` | Admin only: list, create, update and delete users, transfer workloads |
+| `controllers/bills.controller.js` | Bill lifecycle: draft or submit, edit, delete, list (queue, history, mine), view file, approve/reject |
+| `controllers/extract.controller.js` | `POST /bills/extract`: store the file and run extraction |
+| `controllers/vendorAccounts.controller.js` | Default expense account per vendor |
+| `controllers/zoho.controller.js` | Zoho data for the UI (accounts, taxes, contacts, locations), cached 5 min per org |
+| `controllers/health.controller.js` | `GET /api/health` |
+| `services/bills/` | total, allocations, location, validation, workflow (approval chain), save, visibility, present, postToZoho, learning hooks |
+| `services/users/` | validation, workload, transfer |
+| `services/zoho/` | Zoho Books API client: http, OAuth token per org, request, credentials, contacts sync, catalog, `createBill`, `attach` |
+| `services/extraction/` | Bill reading: config, store (cache), pdf, ocr, parseOcr (regex), prompt, providers (Gemini, OpenAI-compatible), race, normalise |
+| `services/learning/` | Learning from corrections: record, compare, similarity, lookup, hints, fewShot |
+| `services/files.service.js` | GridFS file storage (save, read, stream, delete, find unused) |
+| `services/gst.service.js` | GSTIN → state table and the GST vs IGST rule (`taxPlan`) |
+| `services/hierarchy.service.js` | Roles, who reports to whom (`MANAGER_ROLE`), and the PMs below a user (`assignablePms`) |
+| `services/locations.service.js` | Zoho locations with their resolved `state_code` |
 | `data/extract-store.json` | Extraction cache (by file hash and by GSTIN + invoice number) |
 
 ## API
 
 All routes except register and login need `Authorization: Bearer <jwt>`.
 
-**Errors:** every error comes back as `{ error: "message" }` with an HTTP status, and the frontend shows it in a popup. Routes throw `httpError(status, msg)`, and the error handler in `server.js` turns it into JSON.
+**Errors:** every error comes back as `{ error: "message" }` with an HTTP status, and the frontend shows it in a popup. Controllers and services throw `httpError(status, msg)`, and `middleware/errorHandler.js` turns it into JSON.
 
 **Auth** (`/api/auth`)
 - `POST /register`: creates the organisation's Admin and FinanceOrg (checks the Zoho credentials). Each Zoho organisation can be registered once.
@@ -114,14 +139,14 @@ All routes except register and login need `Authorization: Bearer <jwt>`.
 
 ## Key logic
 
-### Extraction (`extract.js`)
+### Extraction (`services/extraction/`)
 1. **Cache:** if this exact file was seen before (`EXTRACT_CACHE` on), the saved result is returned.
 2. **Text:** the PDF's own text layer is used if it's readable. Otherwise the pages are turned into images and read with Tesseract. Only the first 2 + last 2 pages are read unless `pages=all`.
 3. **Regex:** picks out GSTIN, invoice number, date, tax % and total.
 4. **AI:** Gemini, DeepSeek and Groq get the text in parallel. The **first usable result wins** and the others aren't waited for. If every AI fails, the regex result is used.
 5. **Single line:** the PM form turns all extracted items into one line, with rate = the sum of qty × rate before tax.
 
-### Learning from corrections (`learn.js`)
+### Learning from corrections (`services/learning/`)
 No model training. Each extraction is logged, then compared with what the PM actually submitted.
 - **Logging:**
   - `POST /extract` saves the scanned text (up to 8 KB), the raw AI output and which provider answered. The log is keyed by `financeOrgId` and `fileId` (= `pdfFile`).
@@ -134,7 +159,7 @@ No model training. Each extraction is logged, then compared with what the PM act
 - **Scope:** every lookup is limited to the same `financeOrgId`. Logs never submitted are auto-deleted after 30 days.
 - **Safety:** errors are logged and never block extract or submit.
 
-### File storage (`files.js`)
+### File storage (`services/files.service.js`)
 - Files are stored in MongoDB GridFS (bucket `billFiles`), and `Bill.pdfFile` holds the GridFS id. Local disk on Render is wiped on every deploy, which is why files aren't kept there.
 - **When files are deleted:**
   - When the owner or the Admin deletes the bill.
@@ -143,7 +168,7 @@ No model training. Each extraction is logged, then compared with what the PM act
 - Draft, pending and rejected bills keep their file.
 - **Bill data is never deleted automatically.** Only the file is.
 
-### Tax: GST vs IGST (`gst.js`)
+### Tax: GST vs IGST (`services/gst.service.js`)
 - **Vendor state:** the first 2 digits of the vendor GSTIN. The GSTIN comes from the Zoho contact, or from the extracted data if Zoho has none.
 - **Property state:** the `source_of_supply` of the location picked on the bill, which defaults to the uploader's own location. The backend looks the location up in Zoho and takes the state from it: `address.state_code` (e.g. `HR`), else the first 2 digits of the location's GSTIN (`tax_reg_no`), else the state name. It never trusts the request body for the state.
 - **The rule:**
@@ -153,7 +178,7 @@ No model training. Each extraction is logged, then compared with what the PM act
   - No vendor GSTIN, or 0%: no tax slab.
 - At FM approval (or an FM's own upload), slabs are filled in automatically. The FM can override them during approval. Posting is blocked only when the slab can't be worked out.
 
-### Posting to Zoho (`zoho.createBill`)
+### Posting to Zoho (`services/zoho/bills.js` → `createBill`)
 - **States:**
   - `source_of_supply` = the vendor's state.
   - `destination_of_supply` = the property's state.
@@ -189,5 +214,5 @@ Zoho credentials are **not** in `.env`. They're stored for each org in `FinanceO
 
 ```
 npm i
-npm start        # node server.js
+npm start        # node src/server.js
 ```
