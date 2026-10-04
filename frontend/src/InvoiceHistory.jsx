@@ -27,6 +27,28 @@ export function formatINR(val) {
   return '₹' + num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// Property = the PM who submitted the bill (+ their location / state)
+export function propertyOf(b) {
+  const u = b.createdBy || {};
+  return {
+    key: u._id || 'unknown',
+    name: u.location_name || u.name || 'Unknown property',
+    pm: u.name || '—',
+    state: u.source_of_supply || b.source_of_supply || '',
+  };
+}
+
+// Who approved / rejected the bill at each level, from its history
+function approvals(b) {
+  const h = b.history || [];
+  const after = (from) => h.slice(from).find(x => x.action === 'APPROVED' || x.action === 'REJECTED');
+  // last submission starts the current round
+  const start = Math.max(0, h.map(x => x.action).lastIndexOf('RESUBMITTED'), h.map(x => x.action).lastIndexOf('SUBMITTED'));
+  const l1 = after(start);
+  const fin = l1 && l1.action === 'APPROVED' ? after(h.indexOf(l1) + 1) : null;
+  return { l1, fin };
+}
+
 function getStatusBadge(status) {
   switch (status) {
     case 'PENDING_L1':
@@ -44,7 +66,8 @@ function getStatusBadge(status) {
   }
 }
 
-export default function InvoiceHistory({ onEditBill, onNewEntry }) {
+export default function InvoiceHistory({ role = 'PM', onEditBill, onNewEntry }) {
+  const isPM = role === 'PM';
   const [bills, setBills] = useState([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
@@ -54,6 +77,7 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [sortBy, setSortBy] = useState('date-desc');
+  const [propertyFilter, setPropertyFilter] = useState('ALL');
 
   // Preview & Delete modals
   const [previewBill, setPreviewBill] = useState(null);
@@ -65,7 +89,8 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
   const load = async () => {
     setLoading(true);
     try {
-      const { data } = await api.get('/bills');
+      // L1 / Finance see every bill in the org, not just their queue
+      const { data } = await api.get('/bills', { params: isPM ? {} : { scope: 'history' } });
       setBills(data || []);
     } catch (e) {
       setMsg(errMsg(e));
@@ -170,9 +195,27 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
     };
   }, [bills]);
 
+  // Per-property summary (L1 / Finance)
+  const properties = useMemo(() => {
+    const map = new Map();
+    for (const b of bills) {
+      const p = propertyOf(b);
+      const row = map.get(p.key) || { ...p, total: 0, posted: 0, postedAmt: 0, pending: 0, pendingAmt: 0, rejected: 0, totalAmt: 0 };
+      const amt = getBillTotal(b);
+      row.total++; row.totalAmt += amt;
+      if (b.status === 'POSTED') { row.posted++; row.postedAmt += amt; }
+      else if (b.status.startsWith('PENDING')) { row.pending++; row.pendingAmt += amt; }
+      else row.rejected++;
+      map.set(p.key, row);
+    }
+    return [...map.values()].sort((a, b) => b.totalAmt - a.totalAmt);
+  }, [bills]);
+
   // Filter & sort bills
   const filteredBills = useMemo(() => {
     return bills.filter(b => {
+      if (propertyFilter !== 'ALL' && propertyOf(b).key !== propertyFilter) return false;
+
       // Status filter
       if (statusFilter === 'POSTED' && b.status !== 'POSTED') return false;
       if (statusFilter === 'PENDING' && !(b.status === 'PENDING_L1' || b.status === 'PENDING_FINANCE')) return false;
@@ -189,7 +232,9 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
         const numMatch = (b.billNumber || '').toLowerCase().includes(q);
         const vendorMatch = (b.vendorName || '').toLowerCase().includes(q);
         const noteMatch = (b.history?.at(-1)?.comment || '').toLowerCase().includes(q);
-        if (!numMatch && !vendorMatch && !noteMatch) return false;
+        const p = propertyOf(b);
+        const propMatch = !isPM && `${p.name} ${p.pm} ${p.state}`.toLowerCase().includes(q);
+        if (!numMatch && !vendorMatch && !noteMatch && !propMatch) return false;
       }
       return true;
     }).sort((a, b) => {
@@ -211,9 +256,9 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
       }
       return 0;
     });
-  }, [bills, statusFilter, startDate, endDate, search, sortBy]);
+  }, [bills, statusFilter, startDate, endDate, search, sortBy, propertyFilter]);
 
-  const hasActiveFilters = search || statusFilter !== 'ALL' || datePreset !== 'ALL' || startDate || endDate;
+  const hasActiveFilters = search || statusFilter !== 'ALL' || datePreset !== 'ALL' || startDate || endDate || propertyFilter !== 'ALL';
 
   return (
     <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
@@ -222,7 +267,9 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
         <div>
           <h1 className="page-title">Invoice History &amp; Accounting Audit</h1>
           <p className="page-description">
-            Track approved vs. pending billing volume, review approval notes, filter by date, and manage rejected invoices.
+            {isPM
+              ? 'Track approved vs. pending billing volume, review approval notes, filter by date, and manage rejected invoices.'
+              : 'Every bill across all properties — approvals, pending and rejected, by property, with who approved each.'}
           </p>
         </div>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
@@ -233,7 +280,7 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
             </svg>
             Refresh
           </button>
-          <button
+          {isPM && <button
             type="button"
             className="btn btn-primary btn-sm"
             onClick={onNewEntry}
@@ -244,7 +291,7 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
             + Upload New Bill
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -441,6 +488,18 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
               />
             </div>
 
+            {!isPM && (
+              <select
+                className="form-control"
+                value={propertyFilter}
+                onChange={e => setPropertyFilter(e.target.value)}
+                style={{ fontSize: '0.8125rem', padding: '0.35rem 0.5rem', width: '170px' }}
+              >
+                <option value="ALL">All Properties</option>
+                {properties.map(p => <option key={p.key} value={p.key}>{p.name}</option>)}
+              </select>
+            )}
+
             {/* Sort selector */}
             <select
               className="form-control"
@@ -459,7 +518,7 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
                 type="button"
                 className="btn btn-outline-danger btn-sm"
                 onClick={() => {
-                  setSearch('');
+                  setSearch(''); setPropertyFilter('ALL');
                   setStatusFilter('ALL');
                   handleDatePreset('ALL');
                 }}
@@ -472,6 +531,53 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
           </div>
         </div>
       </div>
+
+      {/* ─────────────────── BY PROPERTY (L1 / Finance) ─────────────────── */}
+      {!isPM && properties.length > 0 && (
+        <div className="card" style={{ marginBottom: '1.25rem' }}>
+          <div className="card-header">
+            <div className="card-title">
+              By Property
+              <span className="count-pill" style={{ marginLeft: '0.5rem' }}>{properties.length}</span>
+            </div>
+            <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>Click a row to filter the bills below</div>
+          </div>
+          <div className="table-responsive">
+            <table className="custom-table">
+              <thead>
+                <tr>
+                  <th>Property</th>
+                  <th>Property Manager</th>
+                  <th>State</th>
+                  <th>Bills</th>
+                  <th>Approved &amp; Posted</th>
+                  <th>Pending</th>
+                  <th>Rejected</th>
+                  <th>Total Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {properties.map(p => (
+                  <tr
+                    key={p.key}
+                    onClick={() => setPropertyFilter(propertyFilter === p.key ? 'ALL' : p.key)}
+                    style={{ cursor: 'pointer', background: propertyFilter === p.key ? 'var(--info-bg, rgba(59,130,246,0.06))' : undefined }}
+                  >
+                    <td style={{ fontWeight: 700 }}>{p.name}</td>
+                    <td>{p.pm}</td>
+                    <td>{p.state || '—'}</td>
+                    <td>{p.total}</td>
+                    <td><b>{p.posted}</b> <span style={{ color: 'var(--text-muted)', fontSize: '0.8125rem' }}>· {formatINR(p.postedAmt)}</span></td>
+                    <td>{p.pending} <span style={{ color: 'var(--text-muted)', fontSize: '0.8125rem' }}>· {formatINR(p.pendingAmt)}</span></td>
+                    <td>{p.rejected}</td>
+                    <td><strong>{formatINR(p.totalAmt)}</strong></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* ─────────────────── INVOICE HISTORY TABLE ─────────────────── */}
       <div className="card">
@@ -503,17 +609,17 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
             <p style={{ maxWidth: '420px', margin: '0 auto 1.25rem auto' }}>
               {hasActiveFilters
                 ? 'No bills match your current filters. Try changing or resetting the date or status filters.'
-                : 'You have not uploaded any bills yet. Click below to submit your first invoice.'}
+                : isPM ? 'You have not uploaded any bills yet. Click below to submit your first invoice.' : 'No bills have been submitted yet.'}
             </p>
             {hasActiveFilters ? (
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                onClick={() => { setSearch(''); setStatusFilter('ALL'); handleDatePreset('ALL'); }}
+                onClick={() => { setSearch(''); setStatusFilter('ALL'); setPropertyFilter('ALL'); handleDatePreset('ALL'); }}
               >
                 Clear Filters
               </button>
-            ) : (
+            ) : isPM && (
               <button type="button" className="btn btn-primary" onClick={onNewEntry}>
                 + Upload New Bill
               </button>
@@ -525,10 +631,12 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
               <thead>
                 <tr>
                   <th>Bill / Invoice #</th>
+                  {!isPM && <th>Property</th>}
                   <th>Vendor</th>
                   <th>Bill Date</th>
                   <th>Calculated Total</th>
                   <th>Status</th>
+                  {!isPM && <th>Approved By</th>}
                   <th>Review Note / Feedback</th>
                   <th style={{ textAlign: 'right' }}>Actions</th>
                 </tr>
@@ -537,8 +645,11 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
                 {filteredBills.map(b => {
                   const billTotal = getBillTotal(b);
                   const isRejected = b.status.startsWith('REJECTED');
-                  const canDelete = isRejected || b.status === 'PENDING_L1';
-                  const canEdit = isRejected || b.status === 'PENDING_L1';
+                  const canDelete = isPM && (isRejected || b.status === 'PENDING_L1');
+                  const canEdit = isPM && (isRejected || b.status === 'PENDING_L1');
+                  const prop = propertyOf(b);
+                  const { l1, fin } = approvals(b);
+                  const who = (x) => x ? `${x.action === 'APPROVED' ? '✓' : '✕'} ${x.by}${x.at ? ` · ${new Date(x.at).toLocaleDateString('en-IN')}` : ''}` : '—';
                   const latestNote = b.history?.at(-1)?.comment;
 
                   return (
@@ -570,6 +681,14 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
                           </svg>
                         </button>
                       </td>
+                      {!isPM && (
+                        <td>
+                          <div style={{ fontWeight: 600 }}>{prop.name}</div>
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                            {prop.pm}{prop.state ? ` · ${prop.state}` : ''}
+                          </span>
+                        </td>
+                      )}
                       <td>
                         <div style={{ fontWeight: 600 }}>{b.vendorName || 'Unnamed Vendor'}</div>
                         {b.source_of_supply && (
@@ -597,6 +716,12 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
                         )}
                       </td>
                       <td>{getStatusBadge(b.status)}</td>
+                      {!isPM && (
+                        <td style={{ fontSize: '0.8125rem', whiteSpace: 'nowrap' }}>
+                          <div>L1: {who(l1)}</div>
+                          <div>Finance: {who(fin)}</div>
+                        </td>
+                      )}
                       <td style={{ maxWidth: '280px' }}>
                         {latestNote ? (
                           <div style={{
@@ -656,7 +781,7 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
                           )}
 
                           {/* If rejected, also show quick 'New Entry' */}
-                          {isRejected && (
+                          {isPM && isRejected && (
                             <button
                               type="button"
                               className="btn btn-primary btn-sm"
@@ -822,7 +947,7 @@ export default function InvoiceHistory({ onEditBill, onNewEntry }) {
             </div>
 
             <div className="history-modal-footer">
-              {previewBill.status.startsWith('REJECTED') && (
+              {isPM && previewBill.status.startsWith('REJECTED') && (
                 <>
                   <button
                     type="button"

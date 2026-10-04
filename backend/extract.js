@@ -8,8 +8,8 @@
 //   2. Regex pre-extracts fields from that text (GSTIN, bill no, date, tax, total)
 //   3. OCR text + regex fields go to Gemini, DeepSeek AND Groq (in parallel) as TEXT —
 //      none of them ever sees the document; one attempt each, no retries
-//   4. Results are combined field by field, in priority order:
-//        Gemini → DeepSeek → Groq → regex
+//   4. The first AI to return a usable result wins — the others aren't waited for.
+//      A failed / empty AI just drops out; regex then fills any empty fields.
 //        - if all AIs fail, the regex parse is returned (source: 'tesseract')
 //        - if OCR finds no text, no AI is called (source: 'failed')
 //
@@ -31,7 +31,7 @@
 //   EXTRACT_STORE=./data/extract-store.json (optional)
 //   EXTRACT_CACHE=off                       (optional, default on — off = always extract fresh,
 //                                            never read/write the store)
-//   DEBUG_OCR=1                             (optional, logs OCR text)
+//   DEBUG_OCR=true                          (optional, logs OCR text; false/0/empty = off)
 
 import 'dotenv/config';
 import fs from 'fs';
@@ -43,6 +43,9 @@ import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import { pdf as pdfToImg } from 'pdf-to-img';
 import Tesseract from 'tesseract.js';
 import sharp from 'sharp';
+
+// Env vars are strings, so "false" would be truthy — only true/1/yes turns logging on
+const DEBUG_OCR = /^(true|1|yes)$/i.test(process.env.DEBUG_OCR || '');
 
 // ─────────────────────────── config ───────────────────────────
 const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
@@ -325,7 +328,7 @@ async function ocrText(file, mimeType, trimmed) {
     ? await ocrImage(file)
     : await ocrPdf((trimmed ?? await trimPdf(file, 2, 2)).bytes);
   const cleaned = String(text || '').replace(/[|]/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').trim();
-  if (process.env.DEBUG_OCR) console.log('=== OCR ===\n' + cleaned);
+  if (DEBUG_OCR) console.log('=== OCR ===\n' + cleaned);
   return cleaned;
 }
 
@@ -516,7 +519,7 @@ export async function extractWithMeta(file, mimeType = 'application/pdf', { page
   // 1. Exact same file seen before → no API call
   const cached = USE_CACHE && store.getByHash(cacheKey);
   if (cached) {
-    console.log(`[extract] cache hit ${cacheKey.slice(0, 10)}${ns}`);
+    if (DEBUG_OCR) console.log(`[extract] cache hit ${cacheKey.slice(0, 10)}${ns}`);
     return { data: cached, source: 'cache', duplicate: true, hash, pdfPages };
   }
 
@@ -524,6 +527,13 @@ export async function extractWithMeta(file, mimeType = 'application/pdf', { page
   if (inFlight.has(cacheKey)) return inFlight.get(cacheKey);
 
   const job = (async () => {
+    // Per-step timings, logged once per upload so slow steps are easy to spot
+    const t0 = Date.now();
+    const took = {};
+    const secs = (ms) => `${(ms / 1000).toFixed(1)}s`;
+    const logTimes = (src) => console.log(`[extract] ${secs(Date.now() - t0)} total (${src}) —`,
+      Object.entries(took).map(([k, v]) => `${k} ${v}`).join(', '));
+
     // PDF bytes handed to OCR: first 2 + last 2 pages, or the whole file
     let trimmed = null;
     if (allPages) {
@@ -536,59 +546,68 @@ export async function extractWithMeta(file, mimeType = 'application/pdf', { page
     }
     if (isPdf) {
       pdfPages = { ...pdfPages, read: trimmed.kept, total: trimmed.total };
-      console.log(`[extract] PDF pages (${pdfPages.mode}): ${pdfPages.read ?? '?'} / ${pdfPages.total ?? '?'}`);
+     if (DEBUG_OCR) console.log(`[extract] PDF pages (${pdfPages.mode}): ${pdfPages.read ?? '?'} / ${pdfPages.total ?? '?'}`);
     }
 
     // 1. Tesseract: all text from the document
     let ocr = '';
+    const tOcr = Date.now();
     try {
       ocr = await ocrText(file, mimeType, trimmed);
-      console.log(`[tesseract] ${ocr.length} chars`);
+      took.ocr = secs(Date.now() - tOcr);
+      if (DEBUG_OCR) console.log(`[tesseract] ${ocr.length} chars`);
     } catch (e) {
       console.warn('[tesseract] FAILED:', e.message);
     }
-    if (!ocr) return { data: normalise(null), source: 'failed', duplicate: false, hash, pdfPages };
+    if (!ocr) { logTimes('failed'); return { data: normalise(null), source: 'failed', duplicate: false, hash, pdfPages }; }
 
     // 2. Regex: pre-extract fields from that text
     const ocrParsed = parseOcr(ocr);
-    if (ocrParsed) console.log('[regex]', ocrParsed);
+    if (ocrParsed && DEBUG_OCR) console.log('[regex]', ocrParsed);
 
     // 3. All AIs in parallel: text in → fields out (one attempt each, no document)
     const active = PROVIDERS.filter((p) => process.env[p.key]);
-    console.log('[extract] AI (ocr text):', Object.fromEntries(
+    if (DEBUG_OCR) console.log('[extract] AI (ocr text):', Object.fromEntries(
       PROVIDERS.map((p) => [p.name, process.env[p.key] ? p.model : 'off']),
     ));
 
-    const settled = await Promise.allSettled(active.map((p) => p.run(ocr, ocrParsed)));
-
-    // 4. Combine in priority order: Gemini → DeepSeek → Groq (→ regex below)
+    // 4. Race: the first AI to return a usable result wins — don't wait for the rest.
+    //    A failure (error or empty result) just drops out; the others keep going.
+    //    If none is usable, fall back to the first one that answered at all (→ regex below).
     let data;
     let source;
-    settled.forEach((res, i) => {
-      const { name } = active[i];
-      if (res.status === 'rejected') {
-        console.error(`[${name}] FAILED:`, res.reason?.status ?? '', res.reason?.message);
-        return;
-      }
-      const result = normalise(res.value);
-      console.log(`[${name}] result:`, JSON.stringify(result, null, 2));
-      if (!data) {
-        data = result;
-        source = name;
-        return;
-      }
-      const merged = combine(data, result);
-      if (merged.filled.length) console.log(`[extract] filled from ${name}:`, merged.filled.join(', '));
-      data = merged.data;
+    let fallback;
+    await new Promise((resolve) => {
+      let pending = active.length;
+      const done = () => { if (--pending === 0) resolve(); };
+      active.forEach((p) => {
+        const t = Date.now();
+        p.run(ocr, ocrParsed).then((raw) => {
+          took[p.name] = secs(Date.now() - t);
+          if (data) return;                       // someone already won
+          const result = normalise(raw);
+          if (DEBUG_OCR) console.log(`[${p.name}] result:`, JSON.stringify(result, null, 2));
+          if (isUseful(result)) { data = result; source = p.name; resolve(); }
+          else {
+            console.warn(`[${p.name}] returned no usable fields`);
+            fallback ??= { data: result, source: p.name };
+          }
+        }, (e) => {
+          took[p.name] = 'failed';
+          if (!data) console.error(`[${p.name}] FAILED:`, e?.status ?? '', e?.message);
+        }).finally(done);
+      });
     });
+    if (!data && fallback) ({ data, source } = fallback);
 
+    logTimes(source || 'tesseract');
     if (data) {
       data = normalise(fillGaps(data, ocrParsed));
     } else {
       data = normalise(ocrParsed);
       source = isUseful(data) ? 'tesseract' : 'failed';
       if (source === 'failed') return { data, source, duplicate: false, hash, pdfPages };
-      console.log('[extract] using Tesseract fallback');
+      if (DEBUG_OCR) console.log('[extract] using Tesseract fallback');
     }
 
     // Don't cache empty or OCR-only results, so re-uploading can still reach the AI
@@ -603,7 +622,7 @@ export async function extractWithMeta(file, mimeType = 'application/pdf', { page
     store.save(cacheKey, key, earlier ? earlier.data : data);
 
     if (earlier) {
-      console.log(`[extract] duplicate bill ${key}`);
+      if (DEBUG_OCR) console.log(`[extract] duplicate bill ${key}`);
       return { data: earlier.data, source, duplicate: true, hash, pdfPages };
     }
     return { data, source, duplicate: false, hash, pdfPages };
@@ -620,7 +639,7 @@ export async function extractWithMeta(file, mimeType = 'application/pdf', { page
 /** Same signature and return shape as before: just the extracted data. */
 export async function extract(file, mimeType = 'application/pdf', opts = {}) {
   const { data } = await extractWithMeta(file, mimeType, opts);
-  console.log('grok data', data);
+  if (DEBUG_OCR) console.log('grok data', data);
   return data;
 }
 

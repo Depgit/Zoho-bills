@@ -174,17 +174,19 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
         ? Number(x.tax_percent)
         : 0;
 
-      const rawItems = (x.line_items?.length ? x.line_items : [blank]).map(l => ({
+      // Collapse all extracted rows into ONE line: rate = pre-tax total (qty × rate summed).
+      // PM can still add more lines manually.
+      const xItems = x.line_items || [];
+      const sum = xItems.reduce((s, l) => s + (Number(l.quantity) || 1) * (Number(l.rate) || 0), 0);
+      const fallback = Number(x.total) > 0 && Number(x.tax_amount) > 0 ? Number(x.total) - Number(x.tax_amount) : 0;
+      const totalRate = Math.round((sum || fallback) * 100) / 100;
+      const rawItems = [{
         ...blank,
-        ...l,
-        rate: l.rate || '',   // keep blank if AI returned 0 so PM must fill it
-        tax_percentage: (l.tax_percentage !== undefined && l.tax_percentage !== null && !isNaN(Number(l.tax_percentage)))
-          ? Number(l.tax_percentage)
-          : ((l.tax_percent !== undefined && l.tax_percent !== null && !isNaN(Number(l.tax_percent)))
-            ? Number(l.tax_percent)
-            : defaultTaxPct),
-        tax_id: '',
-      }));
+        name: xItems.length > 1 ? `${xItems[0].name} + ${xItems.length - 1} more` : (xItems[0]?.name || ''),
+        quantity: 1,
+        rate: totalRate || '',   // keep blank if nothing was read so PM must fill it
+        tax_percentage: defaultTaxPct,
+      }];
       const items = vendorId ? applyVendorMemory(vendorId, rawItems) : rawItems;
 
       setF({

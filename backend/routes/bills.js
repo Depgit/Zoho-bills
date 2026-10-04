@@ -1,49 +1,65 @@
 import { Router } from 'express';
 import multer from 'multer';
 import fs from 'fs';
-import path from 'path';
-import { Bill, VendorAccountMap, User, FinanceOrg } from '../models.js';
+import os from 'os';
+import { Bill, VendorAccountMap, User, FinanceOrg, Contact } from '../models.js';
 import { auth } from '../mw.js';
 import { extractWithMeta } from '../extract.js';
 import * as zoho from '../zoho.js';
+import { taxPlan } from '../gst.js';
+import { saveFile, fileExists, streamFile, readFile, deleteFile } from '../files.js';
 const r = Router();
 const up = multer({
-  dest: 'uploads/',
+  dest: os.tmpdir(),                    // temp only — moved into GridFS after extraction
   limits: { fileSize: 10e6 },
   fileFilter: (q, f, cb) => {
     const isAllowed = f.mimetype === 'application/pdf' || f.mimetype.startsWith('image/');
     cb(null, isAllowed);
   }
 });
-const del = f => f && fs.rm(path.join('uploads', f), { force: true }, () => { });
+const del = deleteFile;
 const FIELDS = ['vendorId', 'vendorName', 'billNumber', 'date', 'dueDate', 'lineItems', 'extracted', 'fileType', 'discount_amount', 'discount_percent', 'location_id', 'source_of_supply'];
 const pick = b => Object.fromEntries(FIELDS.map(k => [k, b[k]]));
 
 r.post('/extract', auth('PM'), up.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'PDF or image file required' });
+  // Store in GridFS while extraction runs — no extra wait for the upload
+  const saving = saveFile(req.file.path, req.file.originalname, req.file.mimetype);
+  // pages: 'trim' (first 2 + last 2, default) | 'all' — PDF only
+  const pages = req.body.pages === 'all' ? 'all' : 'trim';
+  const extracting = extractWithMeta(req.file.path, req.file.mimetype, { pages });
+  extracting.catch(() => { });          // awaited below; avoid unhandled rejection if save fails first
+  let pdfFile;
   try {
-    // pages: 'trim' (first 2 + last 2, default) | 'all' — PDF only
-    const pages = req.body.pages === 'all' ? 'all' : 'trim';
-    const { data, source, pdfPages } = await extractWithMeta(req.file.path, req.file.mimetype, { pages });
+    pdfFile = await saving;
+  } catch (e) {
+    await extracting.catch(() => { });  // let extraction finish with the temp file before deleting it
+    fs.rm(req.file.path, { force: true }, () => { });
+    return res.status(500).json({ error: 'Could not store file: ' + e.message });
+  }
+  try {
+    const { data, source, pdfPages } = await extracting;
     res.json({
-      pdfFile: req.file.filename,
+      pdfFile,
       fileType: req.file.mimetype,
       extracted: data,
       extractMeta: { source, pdfPages },
     });
   } catch (e) {
     res.json({
-      pdfFile: req.file.filename,
+      pdfFile,
       fileType: req.file.mimetype,
       extracted: {},
       warning: e.message
     });
+  } finally {
+    fs.rm(req.file.path, { force: true }, () => { });
   }
 });
 
 r.post('/', auth('PM'), async (req, res) => {
   const b = req.body;
-  if (!/^[a-f0-9]{32}$/.test(b.pdfFile || '') || !fs.existsSync(path.join('uploads', b.pdfFile)))
+  if (!(await fileExists(b.pdfFile)))
     return res.status(400).json({ error: 'Invalid upload' });
   if (!b.vendorId || !b.billNumber || !b.date || !b.lineItems?.length ||
     b.lineItems.some(l => !l.account_id || !(l.rate > 0) || !(l.quantity > 0)))
@@ -74,6 +90,17 @@ r.put('/:id', auth('PM'), async (req, res) => {
   if (!['PENDING_L1', 'REJECTED_L1', 'REJECTED_FINANCE'].includes(bill.status))
     return res.status(409).json({ error: 'Bill cannot be edited at this stage' });
   const wasRejected = bill.status.startsWith('REJECTED');
+  // PM re-uploaded the bill while editing → swap in the new file
+  const newFile = req.body.pdfFile;
+  if (newFile && newFile !== bill.pdfFile) {
+    if (!(await fileExists(newFile)))
+      return res.status(400).json({ error: 'Invalid upload' });
+    del(bill.pdfFile);
+    bill.pdfFile = newFile;
+    bill.fileType = req.body.fileType || 'application/pdf';
+  }
+  if (!(await fileExists(bill.pdfFile)))
+    return res.status(400).json({ error: 'Bill file is missing — please re-upload the bill' });
   Object.assign(bill, pick(req.body), { status: 'PENDING_L1', zohoError: null });
   bill.history.push({ by: req.user.name, action: wasRejected ? 'RESUBMITTED' : 'EDITED' });
   res.json(await bill.save());
@@ -94,18 +121,29 @@ r.delete('/:id', auth('PM'), async (req, res) => {
 r.get('/', auth(), async (req, res) => {
   // All queries scoped to the Finance Org
   const orgFilter = req.user.financeOrgId ? { financeOrgId: req.user.financeOrgId } : {};
+  // PM: own bills. L1/Finance: their queue, or ?scope=history → every bill in the org
   const q = req.user.role === 'PM'
     ? { createdBy: req.user.id, ...orgFilter }
-    : { status: req.query.status || (req.user.role === 'L1' ? 'PENDING_L1' : 'PENDING_FINANCE'), ...orgFilter };
-  res.json(await Bill.find(q).populate('createdBy', 'name').sort('-createdAt'));
+    : req.query.scope === 'history'
+      ? orgFilter
+      : { status: req.query.status || (req.user.role === 'L1' ? 'PENDING_L1' : 'PENDING_FINANCE'), ...orgFilter };
+  const list = await Bill.find(q).populate('createdBy', 'name location_name source_of_supply').sort('-createdAt').lean();
+  // Vendor GSTIN: Zoho contact first, else what OCR read off the bill
+  const contacts = await Contact.find({ ...orgFilter, contact_id: { $in: [...new Set(list.map(b => b.vendorId))] } }, 'contact_id gst_no').lean();
+  const gstOf = Object.fromEntries(contacts.map(c => [c.contact_id, c.gst_no]));
+  res.json(list.map(b => {
+    const vendorGstin = gstOf[b.vendorId] || b.extracted?.gstin || '';
+    const { hasGst, vendor, property, interState } = taxPlan({ ...b, vendorGstin }, []);
+    return { ...b, vendorGstin, taxInfo: { hasGst, vendor, property, interState } };
+  }));
 });
 
 r.get('/:id/pdf', auth(), async (req, res) => {
   const b = await Bill.findById(req.params.id);
   if (!b?.pdfFile || (req.user.role === 'PM' && String(b.createdBy) !== req.user.id)) return res.sendStatus(404);
-  const filePath = path.resolve('uploads', b.pdfFile);
-  if (!fs.existsSync(filePath)) return res.sendStatus(404);
-  res.type(b.fileType || 'application/pdf').sendFile(filePath);
+  if (!(await fileExists(b.pdfFile))) return res.sendStatus(404);
+  res.type(b.fileType || 'application/pdf');
+  streamFile(b.pdfFile).on('error', () => res.end()).pipe(res);
 });
 
 const STEP = {
@@ -118,6 +156,8 @@ r.post('/:id/:act(approve|reject)', auth('L1', 'FINANCE'), async (req, res) => {
   const approve = req.params.act === 'approve';
   if (!approve && !req.body.comment) return res.status(400).json({ error: 'Rejection reason required' });
   if (approve && req.user.role === 'FINANCE') {
+    const vendor = await Contact.findOne({ financeOrgId: b.financeOrgId, contact_id: b.vendorId }, 'gst_no').lean();
+    b.vendorGstin = vendor?.gst_no || b.extracted?.gstin || '';
     if (req.body.lineItems && Array.isArray(req.body.lineItems)) {
       req.body.lineItems.forEach((updated, i) => {
         if (b.lineItems[i] && updated.tax_id) {
@@ -126,17 +166,21 @@ r.post('/:id/:act(approve|reject)', auth('L1', 'FINANCE'), async (req, res) => {
       });
       b.markModified('lineItems');
     }
-    const missingTax = b.lineItems.some(l => !l.tax_id);
-    if (missingTax) {
-      return res.status(400).json({ error: 'Please select a Tax Slab for all line items before approving' });
-    }
     // Load the Finance Org to use the correct Zoho credentials
     const org = await FinanceOrg.findById(b.financeOrgId);
     if (!org) return res.status(500).json({ error: 'Finance Org not found for this bill' });
+    // Slab is automatic: vendor GSTIN state vs PM's property state → GST / IGST.
+    // No vendor GSTIN → no GST, so no slab on any line.
+    const plan = taxPlan(b, await zoho.taxes(org).catch(() => []));
+    b.lineItems.forEach(l => { l.tax_id = plan.needsSlab(l) ? (l.tax_id || plan.slabFor(l)) : ''; });
+    b.markModified('lineItems');
+    if (b.lineItems.some(l => plan.needsSlab(l) && !l.tax_id)) {
+      return res.status(400).json({ error: 'Could not pick the tax slab automatically (vendor/property state unknown or no matching slab in Zoho) — please select it' });
+    }
     try {
       b.zohoBillId = await zoho.createBill(org, b);
       try {                                   // attach PDF/image, then delete local copy
-        await zoho.attach(org, b.zohoBillId, path.resolve('uploads', b.pdfFile), b.fileType);
+        await zoho.attach(org, b.zohoBillId, await readFile(b.pdfFile), b.fileType);
         del(b.pdfFile); b.pdfFile = null;
       } catch (e) { b.zohoError = 'Bill created; attachment failed: ' + e.message; }
     } catch (e) {
@@ -145,10 +189,7 @@ r.post('/:id/:act(approve|reject)', auth('L1', 'FINANCE'), async (req, res) => {
   }
   b.status = approve ? s.ok : s.no;
   b.history.push({ by: req.user.name, action: approve ? 'APPROVED' : 'REJECTED', comment: req.body.comment });
-  // Clean up uploaded file on final rejection (both levels) or after failed attach
-  if (!approve && b.pdfFile) {
-    del(b.pdfFile); b.pdfFile = null;
-  }
+  // Keep the file on rejection — PM can edit & resubmit. It's removed when the PM deletes the bill.
   res.json(await b.save());
 });
 // ── Vendor → Default Expense Account memory ──

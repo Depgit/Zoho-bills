@@ -50,6 +50,7 @@ export const Bill = model('Bill', new Schema({
   createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
   financeOrgId: { type: Schema.Types.ObjectId, ref: 'FinanceOrg', required: true },
   history: [{ _id: false, by: String, action: String, comment: String, at: { type: Date, default: Date.now } }],
+  vendorGstin: { type: String, default: '' },    // stamped at Finance approval; empty = no GST
   zohoBillId: String, zohoError: String
 }, { timestamps: true }));
 // Persists vendor → default expense account mapping per user

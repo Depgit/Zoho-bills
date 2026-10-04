@@ -18,6 +18,25 @@ function getStatusBadge(status) {
   }
 }
 
+const isIgst = t => t.tax_specific_type === 'igst' || /igst/i.test(t.tax_name || '');
+
+// Slab for a line: same state → GST (CGST+SGST), different state → IGST, matching the PM's %
+const pickSlab = (taxes, pct, interState) =>
+  taxes.find(t => Number(t.tax_percentage) === Number(pct) && isIgst(t) === interState)?.tax_id || '';
+
+// A line needs a slab only if the bill has a vendor GSTIN and the line has a tax %
+const needsSlab = (bill, l) => !!bill?.taxInfo?.hasGst && Number(l.tax_percentage) > 0;
+
+// Auto-pick every line's slab from vendor state vs property state (taxInfo from the API)
+const autoSlabs = (bill, taxes) => ({
+  ...bill,
+  lineItems: bill.lineItems.map(l => ({
+    ...l,
+    tax_id: !needsSlab(bill, l) ? ''
+      : (bill.taxInfo.interState === null ? l.tax_id : (pickSlab(taxes, l.tax_percentage, bill.taxInfo.interState) || l.tax_id)),
+  })),
+});
+
 export default function Review({ role }) {
   const [bills, setBills] = useState([]);
   const [sel, setSel] = useState(null);
@@ -44,9 +63,15 @@ export default function Review({ role }) {
       .catch(e => console.warn('Could not load taxes:', e));
   }, []);
 
+  const interState = sel?.taxInfo?.interState ?? null;
+  // Taxes may arrive after a bill is opened → fill its slabs then
+  useEffect(() => {
+    if (role === 'FINANCE' && taxes.length) setSel(prev => (prev?.status === 'PENDING_FINANCE' ? autoSlabs(prev, taxes) : prev));
+  }, [taxes]);
+
   const open = async b => {
     const cloned = JSON.parse(JSON.stringify(b));
-    setSel(cloned);
+    setSel(isFinance && cloned.status === 'PENDING_FINANCE' ? autoSlabs(cloned, taxes) : cloned);
     setMsg('');
     setComment('');
     setPdf(null);
@@ -80,7 +105,7 @@ export default function Review({ role }) {
       return;
     }
     if (a === 'approve' && isFinance) {
-      const missingIndex = sel.lineItems.findIndex(l => !l.tax_id);
+      const missingIndex = sel.lineItems.findIndex(l => needsSlab(sel, l) && !l.tax_id);
       if (missingIndex >= 0) {
         setMsg(`Please select a Zoho Tax Slab for line item ${missingIndex + 1} ("${sel.lineItems[missingIndex].name || 'Item'}") before approving.`);
         return;
@@ -240,6 +265,19 @@ export default function Review({ role }) {
               )}
             </div>
 
+            {/* Tax type: vendor GSTIN state vs property (PM) state — decided automatically */}
+            {isFinance && sel.taxInfo && (
+              <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '1rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                <span>Vendor GSTIN: <b>{sel.vendorGstin || 'none'}</b>{sel.taxInfo.vendor && ` (${sel.taxInfo.vendor})`}</span>
+                <span>Property state: <b>{sel.taxInfo.property || sel.source_of_supply || 'not set'}</b></span>
+                <b style={{ color: 'var(--primary)' }}>
+                  {!sel.taxInfo.hasGst ? 'No GSTIN on bill → no tax'
+                    : sel.taxInfo.interState === null ? 'State unknown → pick slab manually'
+                      : sel.taxInfo.interState ? 'Different state → IGST' : 'Same state → GST (CGST + SGST)'}
+                </b>
+              </div>
+            )}
+
             {/* Line Items Breakdown */}
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
@@ -248,7 +286,7 @@ export default function Review({ role }) {
                 </h4>
                 {isFinance && sel.status === 'PENDING_FINANCE' && (
                   <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    * Finance: select appropriate Zoho Tax Slab (GST / IGST) for each item before approving
+                    * Tax slab is picked automatically — change it only if needed
                   </span>
                 )}
               </div>
@@ -266,8 +304,10 @@ export default function Review({ role }) {
                   <tbody>
                     {sel.lineItems.map((l, i) => {
                       const pmRate = l.tax_percentage !== undefined && l.tax_percentage !== null ? l.tax_percentage : null;
-                      const matchingTaxes = pmRate !== null ? taxes.filter(t => Number(t.tax_percentage) === Number(pmRate)) : [];
-                      const otherTaxes = pmRate !== null ? taxes.filter(t => Number(t.tax_percentage) !== Number(pmRate)) : taxes;
+                      // Suggested = PM's % and, once the GSTINs are known, the right type (GST / IGST)
+                      const fits = t => pmRate !== null && Number(t.tax_percentage) === Number(pmRate) && (interState === null || isIgst(t) === interState);
+                      const matchingTaxes = taxes.filter(fits);
+                      const otherTaxes = taxes.filter(t => !fits(t));
 
                       return (
                         <tr key={i}>
@@ -286,7 +326,9 @@ export default function Review({ role }) {
                             </span>
                           </td>
                           <td>
-                            {isFinance && sel.status === 'PENDING_FINANCE' ? (
+                            {isFinance && sel.status === 'PENDING_FINANCE' && !needsSlab(sel, l) ? (
+                              <span style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>No GST</span>
+                            ) : isFinance && sel.status === 'PENDING_FINANCE' ? (
                               <select
                                 className="form-control"
                                 style={{
@@ -300,7 +342,7 @@ export default function Review({ role }) {
                               >
                                 <option value="">— Select Tax Slab —</option>
                                 {matchingTaxes.length > 0 && (
-                                  <optgroup label={`Matches PM Rate (${pmRate}%)`}>
+                                  <optgroup label={`Suggested: ${interState === null ? '' : interState ? 'IGST ' : 'GST '}${pmRate}%`}>
                                     {matchingTaxes.map(t => (
                                       <option key={t.tax_id} value={t.tax_id}>
                                         {t.tax_name} ({t.tax_percentage}%)

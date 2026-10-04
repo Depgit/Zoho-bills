@@ -176,7 +176,7 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
-  const [tab, setTab] = useState('review'); // 'review' | 'admin'
+  const [tab, setTab] = useState('review'); // 'review' | 'history' | 'admin'
   const [pmTab, setPmTab] = useState('upload'); // 'upload' | 'history'
   const [editBillData, setEditBillData] = useState(null);
   const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
@@ -387,8 +387,8 @@ export default function App() {
         </div>
       )}
 
-      {/* Finance sub-nav */}
-      {user.role === 'FINANCE' && (
+      {/* L1 / Finance sub-nav */}
+      {(user.role === 'FINANCE' || user.role === 'L1') && (
         <div style={{
           background: 'var(--color-surface-subtle, #f8fafc)',
           borderBottom: '1px solid var(--color-border)',
@@ -400,14 +400,22 @@ export default function App() {
             className={`btn btn-sm ${tab === 'review' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setTab('review')}
           >
-            📋 Finance Review Queue
+            📋 {user.role === 'L1' ? 'L1 Review Queue' : 'Finance Review Queue'}
           </button>
           <button
-            className={`btn btn-sm ${tab === 'admin' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setTab('admin')}
+            className={`btn btn-sm ${tab === 'history' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setTab('history')}
           >
-            ⚙ Manage Users
+            📜 Invoice History &amp; Analytics
           </button>
+          {user.role === 'FINANCE' && (
+            <button
+              className={`btn btn-sm ${tab === 'admin' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setTab('admin')}
+            >
+              ⚙ Manage Users
+            </button>
+          )}
         </div>
       )}
 
@@ -432,8 +440,11 @@ export default function App() {
             />
           )
         )}
-        {user.role === 'L1' && <Review role={user.role} />}
-        {user.role === 'FINANCE' && (tab === 'admin' ? <Admin /> : <Review role={user.role} />)}
+        {user.role !== 'PM' && (
+          tab === 'history' ? <InvoiceHistory role={user.role} />
+            : tab === 'admin' && user.role === 'FINANCE' ? <Admin />
+              : <Review role={user.role} />
+        )}
       </main>
     </div>
   );
