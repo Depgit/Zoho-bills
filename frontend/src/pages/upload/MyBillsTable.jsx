@@ -38,7 +38,7 @@ export default function MyBillsTable({ bills, onEdit, onDelete, onNavigateHistor
             </thead>
             <tbody>
               {bills.map((b) => (
-                <tr key={b._id}>
+                <tr key={b._id} style={b.status === 'REJECTED' ? { background: 'rgba(239, 68, 68, 0.04)' } : undefined}>
                   <td>
                     <strong style={{ color: 'var(--primary)' }}>{b.billNumber}</strong>
                   </td>
@@ -46,7 +46,10 @@ export default function MyBillsTable({ bills, onEdit, onDelete, onNavigateHistor
                   <td>
                     <StatusBadge bill={b} />
                   </td>
-                  <td style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>{b.history?.at(-1)?.comment || '—'}</td>
+                  <td style={{ color: b.status === 'REJECTED' ? 'var(--danger-text)' : 'var(--text-secondary)', fontSize: '0.8125rem' }}>
+                    {b.history?.at(-1)?.comment || '—'}
+                    {b.status === 'REJECTED' && <div style={{ fontWeight: 600 }}>↩ Sent back to you — edit &amp; resubmit</div>}
+                  </td>
                   <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                     {isEditable(b) && (
                       <>

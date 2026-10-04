@@ -16,6 +16,9 @@ export const isEditable = (b) =>
 
 export const isOwner = (b, userId) => idOf(b?.ownerId) === String(userId);
 
+// Who must fix a rejected bill: always its owner (the uploader), never the PMs it is assigned to
+export const returnedTo = (b) => (b?.ownerId?.name ? `${b.ownerId.name} (${b.ownerId.role})` : 'the uploader');
+
 // Approval trail of the current round: e.g. [CM ✓ Ravi, OM ✕ Priya]
 export function approvalTrail(b) {
   const history = b.history || [];

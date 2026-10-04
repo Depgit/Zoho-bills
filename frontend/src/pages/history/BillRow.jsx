@@ -1,6 +1,7 @@
 import Icon from '../../components/common/Icon.jsx';
 import StatusBadge from '../../components/common/StatusBadge.jsx';
 import { inr } from '../../utils/format.js';
+import { returnedTo } from '../../utils/billStatus.js';
 import { propertyOf } from '../../utils/properties.js';
 import ApprovalTrail from './ApprovalTrail.jsx';
 
@@ -10,11 +11,13 @@ const iconButton = { padding: '0.35rem 0.6rem' };
 // One bill in the history table
 export default function BillRow({ bill: b, amount, showManagerColumns, canEdit, canDelete, onPreview, onEdit, onDelete, onNew }) {
   const rejected = b.status === 'REJECTED';
+  // Only the owner has to act on a rejection; for everyone else it's just a record
+  const mine = rejected && canEdit;
   const note = b.history?.at(-1)?.comment;
   const prop = propertyOf(b);
 
   return (
-    <tr style={rejected ? { background: 'rgba(239, 68, 68, 0.03)' } : {}}>
+    <tr style={mine ? { background: 'rgba(239, 68, 68, 0.03)' } : {}}>
       <td>
         <button
           type="button"
@@ -83,15 +86,16 @@ export default function BillRow({ bill: b, amount, showManagerColumns, canEdit, 
           <div
             style={{
               fontSize: '0.8125rem',
-              color: rejected ? 'var(--danger-text)' : 'var(--text-secondary)',
-              fontWeight: rejected ? 600 : 400,
+              color: mine ? 'var(--danger-text)' : 'var(--text-secondary)',
+              fontWeight: mine ? 600 : 400,
             }}
           >
-            {rejected ? '⚠️ ' : ''}“{note}”
+            {mine ? '⚠️ ' : ''}“{note}”
           </div>
         ) : (
           <span style={{ color: 'var(--text-muted)', fontSize: '0.8125rem' }}>—</span>
         )}
+        {rejected && <div style={small}>{mine ? '↩ Sent back to you — edit & resubmit' : `↩ With ${returnedTo(b)} for changes`}</div>}
       </td>
 
       <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>

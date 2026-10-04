@@ -55,7 +55,7 @@ export default function KpiCards({ kpis: k }) {
         label="Rejected Bills Amount"
         value={k.rejectedAmt}
         valueClass="kpi-val-rejected"
-        meta={<span>Can be corrected &amp; resubmitted or deleted</span>}
+        meta={<span>Sent back to whoever uploaded them to fix &amp; resubmit</span>}
       />
       <KpiCard
         kind="total"

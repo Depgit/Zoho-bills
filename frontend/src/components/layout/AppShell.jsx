@@ -2,6 +2,7 @@ import { useState } from 'react';
 import Navbar from './Navbar.jsx';
 import RoleTabs from './RoleTabs.jsx';
 import WelcomeBanner from './WelcomeBanner.jsx';
+import ReturnedBillsBanner from './ReturnedBillsBanner.jsx';
 import { TABS } from '../../constants/tabs.js';
 import AdminPage from '../../pages/admin/AdminPage.jsx';
 import ReviewPage from '../../pages/review/ReviewPage.jsx';
@@ -28,6 +29,7 @@ export default function AppShell({ user, welcome, onCloseWelcome, onLogout }) {
     <div className="app-container">
       <Navbar user={user} onLogout={onLogout} />
       <WelcomeBanner message={welcome} onClose={onCloseWelcome} />
+      {user.role !== 'ADMIN' && <ReturnedBillsBanner refreshKey={`${active}:${editBill?._id || ''}`} onOpen={() => go('upload')} />}
       <RoleTabs tabs={tabs} active={active} onSelect={go} />
 
       <main className="main-content">

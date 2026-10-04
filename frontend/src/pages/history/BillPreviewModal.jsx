@@ -4,6 +4,7 @@ import Modal from '../../components/common/Modal.jsx';
 import StatusBadge from '../../components/common/StatusBadge.jsx';
 import { useBillDocument } from '../../hooks/useBillDocument.js';
 import { getBillTotal } from '../../utils/billMath.js';
+import { returnedTo } from '../../utils/billStatus.js';
 import { inr } from '../../utils/format.js';
 import PreviewAllocations from './PreviewAllocations.jsx';
 import PreviewLineItems from './PreviewLineItems.jsx';
@@ -75,6 +76,9 @@ export default function BillPreviewModal({ bill: b, canEdit, onClose, onDelete, 
       </div>
 
       <div className="history-modal-footer">
+        {!canEdit && b.status === 'REJECTED' && (
+          <span style={{ marginRight: 'auto', fontSize: '0.8125rem', color: 'var(--text-muted)' }}>↩ With {returnedTo(b)} for changes</span>
+        )}
         {canEdit && b.status === 'REJECTED' && (
           <>
             <button type="button" className="btn btn-outline-danger btn-sm" onClick={closeThen(onDelete)}>

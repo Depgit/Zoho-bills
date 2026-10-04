@@ -55,3 +55,10 @@ export async function pmIdsBelow(user) {
   const users = await orgUsers(user.financeOrgId);
   return below(users, user.id).filter((u) => u.role === 'PM').map((u) => u._id);
 }
+
+// Everyone below a user (Admin: the whole org), for the history team filters
+export async function teamBelow(user) {
+  const users = await orgUsers(user.financeOrgId);
+  const team = user.role === 'ADMIN' ? users.filter((u) => u.role !== 'ADMIN') : below(users, user.id);
+  return team.map(({ _id, name, role, managerId, location_name }) => ({ _id, name, role, managerId, location_name }));
+}

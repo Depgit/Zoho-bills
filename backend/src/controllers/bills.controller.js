@@ -2,7 +2,7 @@
 import { Bill, User } from '../models/index.js';
 import { httpError } from '../utils/httpError.js';
 import { sameId } from '../utils/ids.js';
-import { assignablePms } from '../services/hierarchy.service.js';
+import { assignablePms, teamBelow } from '../services/hierarchy.service.js';
 import { deleteFile, fileExists, streamFile } from '../services/files.service.js';
 import { saveBill } from '../services/bills/save.js';
 import { approve, historyEntry, isEditable, reject } from '../services/bills/workflow.js';
@@ -18,6 +18,11 @@ const saveAction = (b, draft, wasRejected) =>
 export async function listAssignablePms(req, res) {
   const me = await User.findById(req.user.id).lean();
   res.json((await assignablePms(me)).map((u) => ({ _id: u._id, name: u.name, location_name: u.location_name })));
+}
+
+// GET /bills/team — users below me (with managerId), so history can be filtered by OM / CM
+export async function listTeam(req, res) {
+  res.json(await teamBelow(req.user));
 }
 
 export async function createBill(req, res) {

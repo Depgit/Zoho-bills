@@ -12,6 +12,7 @@ const router = Router();
 
 router.post('/extract', uploaders, uploadBillFile, asyncHandler(extractBill));
 router.get('/assignable-pms', uploaders, asyncHandler(bills.listAssignablePms));
+router.get('/team', auth('CM', 'OM', 'FM', 'ADMIN'), asyncHandler(bills.listTeam));
 router.get('/vendor-account-map', uploaders, asyncHandler(getVendorAccounts));
 router.post('/vendor-account-map', uploaders, asyncHandler(saveVendorAccount));
 

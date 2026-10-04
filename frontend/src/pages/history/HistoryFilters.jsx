@@ -2,11 +2,12 @@ import Icon from '../../components/common/Icon.jsx';
 import SearchSelect from '../../components/common/SearchSelect.jsx';
 import { DATE_PRESETS } from '../../utils/dates.js';
 import StatusPills from './StatusPills.jsx';
+import TeamFilters from './TeamFilters.jsx';
 
 const small = { fontSize: '0.8125rem', padding: '0.35rem 0.5rem' };
 
-// Status pills, search, date presets / range, property filter and sort
-export default function HistoryFilters({ filters: f, kpis, properties, showProperty }) {
+// Status pills, search, team (OM / CM / property) filters, date presets / range and sort
+export default function HistoryFilters({ filters: f, kpis, properties, team, showTeam }) {
   return (
     <div className="card" style={{ marginBottom: '1.25rem', padding: '1rem 1.25rem' }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -26,6 +27,8 @@ export default function HistoryFilters({ filters: f, kpis, properties, showPrope
           </div>
         </div>
       </div>
+
+      {showTeam && <TeamFilters filters={f} team={team} properties={properties} />}
 
       <div
         style={{
@@ -63,17 +66,6 @@ export default function HistoryFilters({ filters: f, kpis, properties, showPrope
               />
             </div>
           ))}
-
-          {showProperty && (
-            <SearchSelect value={f.property} onChange={(e) => f.setProperty(e.target.value)} style={{ ...small, width: '170px' }}>
-              <option value="ALL">All Properties</option>
-              {properties.map((p) => (
-                <option key={p.key} value={p.key}>
-                  {p.name}
-                </option>
-              ))}
-            </SearchSelect>
-          )}
 
           <SearchSelect value={f.sortBy} onChange={(e) => f.setSortBy(e.target.value)} style={{ ...small, width: '150px' }}>
             <option value="date-desc">Newest Date First</option>

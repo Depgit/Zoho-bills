@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../api/client.js';
+import { useApiList } from '../../hooks/useApiList.js';
 import { showError } from '../../api/errors.js';
 import Icon from '../../components/common/Icon.jsx';
 import InfoBanner from '../../components/common/InfoBanner.jsx';
@@ -52,9 +53,12 @@ export default function HistoryPage({ role = 'PM', userId, onEditBill, onNewEntr
     load();
   }, []);
 
-  const kpis = useMemo(() => computeKpis(bills, amountOf), [bills]);
-  const properties = useMemo(() => summariseProperties(bills), [bills]);
-  const filters = useHistoryFilters(bills, { amountOf, searchProperties: !isPM });
+  // CM/OM/FM/Admin: the people below them, for the OM / CM filters
+  const [team] = useApiList('/bills/team', { enabled: !isPM });
+  const filters = useHistoryFilters(bills, { amountOf, searchProperties: !isPM, team });
+  // KPIs and the property summary follow the selected OM / CM
+  const kpis = useMemo(() => computeKpis(filters.teamBills, amountOf), [filters.teamBills]);
+  const properties = useMemo(() => summariseProperties(filters.teamBills), [filters.teamBills]);
 
   const deleteBill = async (b) => {
     try {
@@ -95,8 +99,9 @@ export default function HistoryPage({ role = 'PM', userId, onEditBill, onNewEntr
 
       <InfoBanner message={message} onClose={() => setMessage('')} style={{ marginBottom: '1.25rem' }} />
       <KpiCards kpis={kpis} />
-      <HistoryFilters filters={filters} kpis={kpis} properties={properties} showProperty={!isPM} />
       {!isPM && <PropertySummary properties={properties} selected={filters.property} onSelect={filters.setProperty} />}
+
+      <HistoryFilters filters={filters} kpis={kpis} properties={properties} team={team} showTeam={!isPM} />
 
       <BillsTable
         bills={filters.filtered}
