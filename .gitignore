@@ -4,3 +4,4 @@ frontend/node_modules
 .DS_Store
 backend/seed.js
 backend/uploads/**
+.kilo

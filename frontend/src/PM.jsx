@@ -42,6 +42,14 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
   const [mine, setMine] = useState([]);
   const [q, setQ] = useState('');
   const [extracting, setExtracting] = useState(false);
+  // PDF pages sent for extraction: 'trim' = first 2 + last 2, 'all' = every page
+  const [pdfPages, setPdfPages] = useState(() => {
+    try { return localStorage.getItem('pdfPages') === 'all' ? 'all' : 'trim'; } catch { return 'trim'; }
+  });
+  const choosePdfPages = v => {
+    setPdfPages(v);
+    try { localStorage.setItem('pdfPages', v); } catch { /* ignore */ }
+  };
   const [submitting, setSubmitting] = useState(false);
   // vendor → default account_id map (backed by DB)
   const [vendorAccountMap, setVendorAccountMap] = useState({});
@@ -129,12 +137,14 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
 
   const upload = async e => {
     const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-uploading the same file (e.g. to compare page modes)
     if (!file) return;
 
     setExtracting(true);
     setMsg('Extracting data from invoice via AI OCR…');
     const fd = new FormData();
     fd.append('file', file);
+    fd.append('pages', pdfPages);
 
     try {
       const { data } = await api.post('/bills/extract', fd);
@@ -188,9 +198,16 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
         discount_amount: x.discount_amount || 0,
         discount_percent: x.discount_percent || 0,
         lineItems: items,
+        accountPicked: false,
       });
       setEditingId(null);
-      setMsg(data.warning ? `Note: ${data.warning}` : matchHint);
+      const pp = data.extractMeta?.pdfPages;
+      const pagesHint = pp
+        ? `PDF: ${pp.mode === 'all' ? 'all pages' : 'first 2 + last 2'}${pp.read ? ` (${pp.read}/${pp.total ?? '?'} read)` : ''}`
+        : '';
+      const sourceHint = data.extractMeta?.source ? `via ${data.extractMeta.source}` : '';
+      const metaHint = [pagesHint, sourceHint].filter(Boolean).join(' · ');
+      setMsg(data.warning ? `Note: ${data.warning}` : [matchHint, metaHint].filter(Boolean).join(' — '));
     } catch (er) {
       setMsg(errMsg(er));
     } finally {
@@ -201,8 +218,17 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
 
   const setLine = (i, k, v) => {
-    const updated = f.lineItems.map((l, j) => j === i ? { ...l, [k]: v } : l);
-    setF(prev => ({ ...prev, lineItems: updated }));
+    let updated = f.lineItems.map((l, j) => j === i ? { ...l, [k]: v } : l);
+    // First expense account picked on a bill → copy it to the other lines that were
+    // empty or had the same (auto-filled) account. Later picks change only that line.
+    const firstAccountPick = k === 'account_id' && v && !f.accountPicked;
+    if (firstAccountPick) {
+      const prevAcct = f.lineItems[i].account_id;
+      updated = updated.map((l, j) => (j !== i && (!l.account_id || l.account_id === prevAcct))
+        ? { ...l, account_id: v }
+        : l);
+    }
+    setF(prev => ({ ...prev, lineItems: updated, ...(firstAccountPick && { accountPicked: true }) }));
     // When account_id changes and we have a vendor, persist the mapping
     if (k === 'account_id' && f.vendorId && v) {
       saveVendorAccount(f.vendorId, v);
@@ -295,6 +321,8 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
           ? Number(l.tax_percentage)
           : (taxes.find(t => t.tax_id === l.tax_id)?.tax_percentage || 0)
       })),
+      // existing bill with accounts already chosen → don't overwrite other lines
+      accountPicked: (b.lineItems || []).some(l => l.account_id),
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -382,6 +410,19 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
             </svg>
             Upload Vendor Invoice (PDF / Image)
           </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', marginLeft: 'auto', marginRight: '0.75rem' }}>
+            PDF pages
+            <select
+              className="form-control"
+              style={{ width: 'auto', padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
+              value={pdfPages}
+              onChange={e => choosePdfPages(e.target.value)}
+              disabled={extracting}
+            >
+              <option value="trim">First 2 + last 2</option>
+              <option value="all">All pages</option>
+            </select>
+          </label>
           {extracting && (
             <div className="loading-indicator" style={{ margin: 0, padding: '0.35rem 0.75rem' }}>
               <div className="spinner"></div>
@@ -610,7 +651,11 @@ export default function PM({ initialEditBill, onClearInitialEdit, onNavigateHist
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                onClick={() => set('lineItems', [...f.lineItems, blank])}
+                onClick={() => set('lineItems', [
+                  ...f.lineItems,
+                  // new line starts with the account already used on this bill
+                  { ...blank, account_id: f.lineItems.find(l => l.account_id)?.account_id || '' },
+                ])}
               >
                 + Add Item
               </button>

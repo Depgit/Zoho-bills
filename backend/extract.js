@@ -1,291 +1,128 @@
-// extract.js
+// extract.js — Tesseract + regex → Gemini (free tier) invoice extractor
+//
+// Flow:
+//   1. Tesseract reads ALL text from the document (local, free)
+//        PDF   → first 2 + last 2 pages by default, or every page with { pages: 'all' }
+//                (embedded text layer, else OCR)
+//        Image → whole image
+//   2. Regex pre-extracts fields from that text (GSTIN, bill no, date, tax, total)
+//   3. OCR text + regex fields go to Gemini, DeepSeek AND Groq (in parallel) as TEXT —
+//      none of them ever sees the document; one attempt each, no retries
+//   4. Results are combined field by field, in priority order:
+//        Gemini → DeepSeek → Groq → regex
+//        - if all AIs fail, the regex parse is returned (source: 'tesseract')
+//        - if OCR finds no text, no AI is called (source: 'failed')
+//
+// Saves free-tier quota by:
+//   1. Same file uploaded again          → returned from cache, no API call
+//   2. Same file uploaded at same moment → shares one API call
+//   3. Calls go one at a time with a gap → avoids 429 rate-limit errors
+// And flags duplicate bills (same seller GSTIN + invoice no, even if re-photographed).
+//
+// npm install @google/genai pdf-lib dotenv tesseract.js sharp pdf-parse pdf-to-img
+// .env:
+//   GEMINI_API_KEY=your_key
+//   GEMINI_MODEL=gemini-flash-latest        (optional)
+//   GEMINI_MIN_GAP_MS=4500                  (optional, ~13 calls/min)
+//   DEEPSEEK_API_KEY=your_key               (optional, skipped if missing)
+//   DEEPSEEK_MODEL=deepseek-chat            (optional)
+//   GROQ_API_KEY=your_key                   (optional, skipped if missing)
+//   GROQ_MODEL=openai/gpt-oss-120b          (optional)
+//   EXTRACT_STORE=./data/extract-store.json (optional)
+//   EXTRACT_CACHE=off                       (optional, default on — off = always extract fresh,
+//                                            never read/write the store)
+//   DEBUG_OCR=1                             (optional, logs OCR text)
+
+import 'dotenv/config';
 import fs from 'fs';
-import Anthropic from '@anthropic-ai/sdk';
+import path from 'path';
+import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
 import { PDFDocument } from 'pdf-lib';
-import pdf from 'pdf-parse';
+import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import { pdf as pdfToImg } from 'pdf-to-img';
 import Tesseract from 'tesseract.js';
 import sharp from 'sharp';
 
-// ─────────────────────────── constants ───────────────────────────
-const MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
-const MONEY = /\d[\d,]*\.\d{2}/g;
-const DATE_RE = /(\d{1,2})[\s\-\/.]([A-Za-z]{3}|\d{1,2})[\s\-\/.](\d{4}|\d{2})/g;
-const SLABS = [0, 0.25, 3, 5, 12, 18, 28];
+// ─────────────────────────── config ───────────────────────────
+const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+const MIN_GAP_MS = Number(process.env.GEMINI_MIN_GAP_MS || 4500);
+const STORE_FILE = process.env.EXTRACT_STORE || './data/extract-store.json';
+const USE_CACHE = !/^(off|false|0|no)$/i.test(process.env.EXTRACT_CACHE || '');
+
 const GSTIN_RE_STR = '\\d{2}[A-Z]{5}\\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]';
 const VALID_GSTIN = new RegExp(`^${GSTIN_RE_STR}$`, 'i');
 
-// Legal-suffix patterns used to spot a proper company name.
-const COMPANY_SUFFIX = /^(.+?(?:Pvt\.?\s*Ltd\.?|Private\s+Limited|LLP|Limited|Inc\.?|Corporation|Corp\.?|Technologies|Solutions|Systems|Services|Enterprises|Traders|Industries|Agencies|Distributors|Suppliers|Trading))\b/im;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Lines that should never be mistaken for the vendor name.
-const VENDOR_BAD = /(:|GSTIN|Tax\s*Invoice|Invoice\s*#|Order|Cons\s*No|Booking|Name\s*:|Address\s*:|Landmark|Category|Equipment|Price|CGST|SGST|IGST|Net\s*Payable|Paid|Total|Sub\s*Total|Date|Amount|Rate|Qty|HSN|SAC|Refill|WhatsApp|Missed|Emergency|Working|Customer|LPG|Indian\s*Oil|Balance\s*Due|Due\s*Date|Invoice\s*Date|Place\s*of\s*Supply|Bill\s*To|Ship\s*To|Billed\s*To|Consignee|Buyer)/i;
-
-// Where the buyer block begins. Everything from here on is not the seller.
-const BUYER_MARKERS = /\b(Bill\s*To|Billed\s*To|Ship\s*To|Consignee|Buyer|Customer|Name\s*:)/i;
-
-// Invoice-number patterns, tried in order. Leading digits allowed.
-const INVOICE_PATTERNS = [
-  /Tax\s+Invoice\s*(?:No\.?)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\/\-]{4,})/i,
-  /Invoice\s*#?\s*(?:No\.?)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\/\-]{4,})/i,
-  /\b([A-Z]{2,6}\/\d{2}-\d{2}\/\d{4,})\b/,   // YCS/26-27/028915
-  /\b(\d{1,4}-\d{8,})\b/,                     // 5-106639814873 (IndianOil LPG)
-];
-
-// ─────────────────── GSTIN fuzzy-repair tables ───────────────────
-// Layout of a valid GSTIN:  d d L L L L L d d d d L a Z a
-// (d = digit, L = letter, a = alphanumeric, Z = literal 'Z')
-const GSTIN_LAYOUT = 'ddLLLLLddddLaZa'.split('');
-
-// Common OCR confusions when a digit was mis-read as a letter, and vice-versa.
-const OCR_TO_DIGIT = { O: '0', o: '0', I: '1', l: '1', L: '1', S: '5', s: '5', B: '8', Z: '2', z: '2', G: '6', D: '0', Q: '0', T: '7' };
-const OCR_TO_LETTER = { '0': 'O', '1': 'I', '5': 'S', '8': 'B', '2': 'Z', '6': 'G' };
-
-// Try to turn a 15-char OCR token into a valid GSTIN using the layout.
-function repairGstinCandidate(s) {
-  if (!s || s.length !== 15) return '';
-  let out = '';
-  for (let i = 0; i < 15; i++) {
-    const ch = s[i].toUpperCase();
-    const kind = GSTIN_LAYOUT[i];
-    if (kind === 'd') out += OCR_TO_DIGIT[ch] || ch;
-    else if (kind === 'L') out += OCR_TO_LETTER[ch] || ch;
-    else if (kind === 'Z') out += 'Z';
-    else out += ch;
-  }
-  return VALID_GSTIN.test(out) ? out : '';
-}
-
-// ─────────────────────────── generic helpers ───────────────────────────
-const iso = (s) => {
-  const m = /(\d{1,2})[-\/ ]([a-z]{3})[a-z]*[-\/ ](\d{4})/i.exec(s || '');
-  return m ? `${m[3]}-${String(MON[m[2].toLowerCase()]).padStart(2, '0')}-${m[1].padStart(2, '0')}` : null;
+// ─────────────────────────── store ───────────────────────────
+// Simple JSON-file store. To use MongoDB instead, replace these three
+// methods with collection lookups — nothing else in the file changes.
+//   byHash:    sha256(file)        → extracted data
+//   byInvoice: "GSTIN|INVOICE_NO"  → { hash, data }
+const store = {
+  _data: null,
+  _load() {
+    if (this._data) return this._data;
+    try {
+      this._data = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
+    } catch {
+      this._data = { byHash: {}, byInvoice: {} };
+    }
+    return this._data;
+  },
+  _save() {
+    fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
+    const tmp = `${STORE_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this._data, null, 2));
+    fs.renameSync(tmp, STORE_FILE); // atomic replace, no half-written file
+  },
+  getByHash(hash) { return this._load().byHash[hash] || null; },
+  getByInvoice(key) { return this._load().byInvoice[key] || null; },
+  save(hash, invoiceKey, data) {
+    const d = this._load();
+    d.byHash[hash] = data;
+    if (invoiceKey && !d.byInvoice[invoiceKey]) d.byInvoice[invoiceKey] = { hash, data };
+    this._save();
+  },
 };
-const num = (s) => parseFloat(String(s ?? '').replace(/[₹,\s]/g, '')) || 0;
 
-function findDate(str) {
-  if (!str) return '';
-  for (const m of String(str).matchAll(DATE_RE)) {
-    const d = +m[1];
-    const mo = isNaN(m[2]) ? MON[m[2].toLowerCase()] : +m[2];
-    let y = +m[3]; if (y < 100) y += 2000;
-    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && y >= 2000 && y <= 2100)
-      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-  }
-  return '';
-}
-const snapSlab = (p) => SLABS.reduce((a, b) => Math.abs(b - p) < Math.abs(a - p) ? b : a);
-
-// Strip barcode/pattern garbage and flag pages that are mostly noise.
-function cleanExtractedText(raw) {
-  if (!raw) return null;
-  const tokens = String(raw).split(/\s+/).filter(Boolean);
-  if (!tokens.length) return null;
-
-  const singleCharRatio = tokens.filter((t) => t.length === 1).length / tokens.length;
-  const isGarbage = singleCharRatio > 0.4;
-
-  const cleaned = String(raw)
-    .replace(/[|]/g, ' ')
-    .replace(/(?:\b1\b\s+){4,}/g, ' ')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n{2,}/g, '\n');
-
-  return { cleaned, isGarbage };
+function fileHash(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
-// Retry wrapper for transient upstream errors (Gemini 503/429).
-async function withRetry(fn, tries = 4, baseMs = 800) {
-  let last;
-  for (let i = 0; i < tries; i++) {
-    try { return await fn(); }
-    catch (e) {
-      last = e;
-      const code = e?.error?.code || e?.status || e?.code;
-      if (code !== 503 && code !== 'UNAVAILABLE' && code !== 429) throw e;
-      await new Promise((r) => setTimeout(r, baseMs * 2 ** i));
-    }
-  }
-  throw last;
+function invoiceKey(data) {
+  if (!data?.gstin || !data?.invoice_no) return null;
+  const inv = String(data.invoice_no).toUpperCase().replace(/\s+/g, '');
+  return `${data.gstin}|${inv}`;
 }
 
-// ─────────────────── field extractors (shared by Tesseract & Regex) ───────────────────
+// ─────────────────────────── queue ───────────────────────────
+// Runs Gemini calls one at a time, at least MIN_GAP_MS apart,
+// so parallel uploads don't blow through the per-minute limit.
+let chain = Promise.resolve();
+let lastCallAt = 0;
 
-// Vendor name: prefer a proper company name (title-case + legal suffix) inside the
-// header region; fall back to an ALL-CAPS banner; never cross into the buyer block.
-function guessVendorFromText(text) {
-  if (!text) return '';
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-
-  // Cut off at the first buyer-section marker so we never pick the buyer's name.
-  let cutoff = lines.length;
-  for (let i = 0; i < lines.length; i++) {
-    if (BUYER_MARKERS.test(lines[i])) { cutoff = i; break; }
-  }
-  const head = lines.slice(0, cutoff);
-
-  // 1) Proper company name (title case + legal suffix) in the header region.
-  //    Wins over ALL-CAPS banners like "TAX INVOICE".
-  //    IMPORTANT: test the *matched name* (m[1]), not the entire line, because
-  //    OCR often merges "MARS ENTERPRISES GSTIN: ..." onto one line.
-  for (const line of head) {
-    const m = COMPANY_SUFFIX.exec(line);
-    if (m && !VENDOR_BAD.test(m[1])) return m[1].trim();
-  }
-
-  // 2) ALL-CAPS banner in the header region (e.g. "MARS ENTERPRISES" on LPG receipt).
-  const caps = head.slice(0, 20).find((l) => {
-    const letters = l.replace(/[^A-Za-z]/g, '');
-    if (letters.length < 6 || l.length > 60) return false;
-    const upperRatio = (l.match(/[A-Z]/g) || []).length / letters.length;
-    if (!(upperRatio > 0.7 && /^[A-Z][A-Z0-9 .&'\-]+$/.test(l))) return false;
-    // Reject only if the candidate itself contains a hard bad word.
-    return !/\b(GSTIN|Tax\s*Invoice|Net\s*Payable|Balance\s*Due|Invoice\s*#?)\b/i.test(l);
+function enqueue(fn) {
+  const run = chain.then(async () => {
+    const wait = lastCallAt + MIN_GAP_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastCallAt = Date.now();
+    return fn();
   });
-  if (caps) return caps;
-
-  // 3) Company-suffix anywhere (no buyer markers were seen — trust the first match).
-  const anySuffix = COMPANY_SUFFIX.exec(text);
-  return anySuffix?.[1]?.trim() || '';
+  chain = run.catch(() => {}); // one failure must not block the queue
+  return run;
 }
 
-// Find every GSTIN-like token in text, repairing OCR errors.
-function extractGstins(text) {
-  if (!text) return [];
-  const out = new Set();
-
-  // (1) strict, well-formed GSTINs
-  for (const m of text.matchAll(new RegExp(`\\b${GSTIN_RE_STR}\\b`, 'gi'))) {
-    out.add(m[0].toUpperCase());
-  }
-
-  // (2) fuzzy: 15-char alphanumeric tokens that become valid after repair
-  for (const m of text.matchAll(/\b([0-9A-Za-z]{15})\b/g)) {
-    const fixed = repairGstinCandidate(m[1]);
-    if (fixed) out.add(fixed);
-  }
-
-  return [...out];
-}
-
-
-
-function pickSellerGstin(text, gstins = []) {
-  if (!text) return gstins[0] || '';
-
-  // 1) Any "GSTIN" label that is NOT "GSTIN Cust" (i.e. seller side),
-  //    scan the next ~40 chars for a 14–16 char alphanumeric token.
-  const labelRe = /\bGSTIN\b(?!\s*:?\s*Cust)[\s:\-]*([^\n]{0,40})/gi;
-  for (const m of text.matchAll(labelRe)) {
-    const toks = (m[1].match(/[0-9A-Za-z]+/g) || []);
-    for (const tok of toks) {
-      if (tok.length === 15 && VALID_GSTIN.test(tok)) return tok.toUpperCase();
-      if (tok.length === 15) {
-        const fixed = repairGstinCandidate(tok);
-        if (fixed) return fixed;
-      }
-      if (tok.length === 14 || tok.length === 16) {
-        for (let i = 0; i + 15 <= tok.length; i++) {
-          const fixed = repairGstinCandidate(tok.slice(i, i + 15));
-          if (fixed) return fixed;
-        }
-      }
-    }
-  }
-
-  // 2) Header region (first 800 chars) — any 15-char token that repairs to a valid GSTIN.
-  const head = text.slice(0, 800);
-  for (const m of head.matchAll(/\b([0-9A-Za-z]{15})\b/g)) {
-    const fixed = repairGstinCandidate(m[1]);
-    if (fixed) return fixed;
-  }
-
-  // 3) Strict regex anywhere.
-  const m2 = new RegExp(`\\b${GSTIN_RE_STR}\\b`).exec(text);
-  if (m2) return m2[0].toUpperCase();
-
-  return gstins[0] || '';
-}
-
-// Invoice number: try each pattern, skip anything that parses as a date.
-function pickInvoiceNo(text) {
-  if (!text) return '';
-  for (const p of INVOICE_PATTERNS) {
-    const m = p.exec(text);
-    if (m && !findDate(m[1])) return m[1];
-  }
-  return '';
-}
-
-// Tax %: works even if OCR dropped the '%' char (@9 instead of @9%).
-// Returns { tax_percent: number, tax_name: string }
-function guessTaxInfo(text) {
-  if (!text) return { tax_percent: 0, tax_name: '' };
-  const grab = (re) => +(re.exec(text)?.[1] || 0);
-
-  const igst = grab(/IGST\s*[@]?\s*(\d+(?:\.\d+)?)/i);
-  const cgst = grab(/CGST\s*[@]?\s*(\d+(?:\.\d+)?)/i);
-  const sgst = grab(/SGST\s*[@]?\s*(\d+(?:\.\d+)?)/i);
-  const gst = grab(/\bGST\s*[@]?\s*(\d+(?:\.\d+)?)/i);
-
-  if (igst) {
-    return { tax_percent: snapSlab(igst), tax_name: `IGST${snapSlab(igst)}` };
-  }
-  if (cgst || sgst) {
-    const combined = snapSlab(cgst + sgst);
-    const name = cgst && sgst ? `CGST${snapSlab(cgst)}+SGST${snapSlab(sgst)}` : `CGST${snapSlab(cgst || sgst)}`;
-    return { tax_percent: combined, tax_name: name };
-  }
-  if (gst) {
-    return { tax_percent: snapSlab(gst), tax_name: `GST${snapSlab(gst)}` };
-  }
-
-  const pcts = [...text.matchAll(/(\d+(?:\.\d+)?)\s*%/g)]
-    .map((m) => +m[1]).filter((p) => p > 0 && p <= 28);
-  if (pcts.length >= 2) {
-    const combined = snapSlab(pcts[0] + pcts[1]);
-    return { tax_percent: combined, tax_name: `GST${combined}` };
-  }
-  if (pcts.length === 1) {
-    const p = snapSlab(pcts[0]);
-    return { tax_percent: p, tax_name: `GST${p}` };
-  }
-  return { tax_percent: 0, tax_name: '' };
-}
-// Backward-compat shim used by older call sites.
-const guessTaxPercent = (text) => guessTaxInfo(text).tax_percent;
-
-// Total: Net Payable → Balance Due → Total (not Sub Total) → max(MONEY).
-function pickTotal(text, lines) {
-  if (!text) return 0;
-
-  const np = /Net\s*Payable\s*(?:\(Rs\.?\))?\s*[: ]\s*([\d,]+\.\d{2})/i.exec(text);
-  if (np) return num(np[1]);
-
-  const bd = /Balance\s+Due\s*(?:Rs\.?\s*)?([\d,]+\.\d{2})/i.exec(text);
-  if (bd) return num(bd[1]);
-
-  const scanLines = lines || text.split('\n');
-  for (const line of scanLines) {
-    if (/^\s*Total\b/i.test(line) && !/Sub\s*Total/i.test(line)) {
-      const m = /([\d,]+\.\d{2})/.exec(line);
-      if (m) return num(m[1]);
-    }
-  }
-  const amounts = (text.match(MONEY) || []).map(num);
-  return amounts.length ? Math.max(...amounts) : 0;
-}
-
-// ─────────────────── trim PDF once, reuse everywhere ───────────────────
+// ─────────────────── trim PDF: keep first 2 + last 2 pages ───────────────────
 async function trimPdf(filePath, firstN = 2, lastN = 2) {
   const raw = fs.readFileSync(filePath);
   try {
-    const doc = await PDFDocument.load(raw);
+    const doc = await PDFDocument.load(raw, { ignoreEncryption: true });
     const total = doc.getPageCount();
 
     if (total <= firstN + lastN) {
-      return { bytes: raw, base64: raw.toString('base64') };
+      return { base64: raw.toString('base64'), bytes: raw, total, kept: total };
     }
 
     const idx = [
@@ -299,14 +136,14 @@ async function trimPdf(filePath, firstN = 2, lastN = 2) {
     copied.forEach((p) => out.addPage(p));
 
     const bytes = Buffer.from(await out.save());
-    return { bytes, base64: bytes.toString('base64') };
+    return { base64: bytes.toString('base64'), bytes, total, kept: unique.length };
   } catch (e) {
-    console.warn('trimPdf failed, using raw PDF:', e.message);
-    return { bytes: raw, base64: raw.toString('base64') };
+    console.warn('[trimPdf] failed, sending full PDF:', e.message);
+    return { base64: raw.toString('base64'), bytes: raw };
   }
 }
 
-// ──────────────────────────── PROMPT ────────────────────────────
+// ──────────────────────────── prompt ────────────────────────────
 const PROMPT = `Extract this Indian GST tax invoice summary.
 Look at the first pages for header/vendor details and the last page for totals and tax rates.
 
@@ -327,6 +164,8 @@ Instructions:
    - The buyer's GSTIN is next to labels like "GSTIN Cust", "Customer GSTIN",
      "Buyer GSTIN", or under Bill-To / Ship-To blocks.
    - Return every distinct 15-character GSTIN you can read.
+8. date: convert to YYYY-MM-DD. Indian invoices write dates day-first (DD/MM/YYYY).
+9. All amounts as plain numbers, no ₹ symbol or commas.
 
 Reply with ONLY valid JSON:
 {
@@ -346,410 +185,443 @@ Reply with ONLY valid JSON:
   ]
 }`;
 
-async function viaGemini(file, mimeType = 'application/pdf', trimmed = null) {
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  const isPdf = !mimeType?.startsWith('image/');
-  const base64Data = isPdf && trimmed ? trimmed.base64 : fs.readFileSync(file).toString('base64');
+function extractJson(raw) {
+  const cleaned = String(raw || '').replace(/```json|```/g, '').trim();
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start === -1 || end === -1) {
+    throw new Error(`No JSON object found in response: ${cleaned.slice(0, 200)}`);
+  }
+  return JSON.parse(cleaned.slice(start, end + 1));
+}
 
-  const res = await withRetry(() => ai.models.generateContent({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-    contents: [{
-      role: 'user',
-      parts: [
-        { inlineData: { mimeType, data: base64Data } },
-        { text: PROMPT },
+// ──────────────────────────── Gemini ────────────────────────────
+let ai;
+function client() {
+  if (!ai) ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  return ai;
+}
+
+// Text mode (default): OCR text + regex fields only, no file.
+const TEXT_INTRO = `You are given the raw OCR text of an invoice (not the image). OCR may mis-read
+characters (O↔0, I↔1, S↔5, B↔8) and break table rows across lines — use context to correct them.
+If a field is genuinely not in the text, leave it empty / 0.\n\n`;
+
+// Same text prompt for Gemini and DeepSeek.
+function textPrompt(ocrText, regexFields) {
+  return TEXT_INTRO + PROMPT
+    + `\n\nFields pre-extracted by regex (may be wrong or incomplete — verify against the text):\n${JSON.stringify(regexFields ?? {}, null, 2)}`
+    + `\n\nDocument text (Tesseract OCR):\n-----\n${ocrText.slice(0, 30000)}\n-----`;
+}
+
+async function viaGeminiText(ocrText, regexFields) {
+  return askGemini([{ text: textPrompt(ocrText, regexFields) }]);
+}
+
+// ─────────────────── DeepSeek / Groq (OpenAI-compatible) ───────────────────
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+
+async function chatJson(name, url, apiKey, model, ocrText, regexFields) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: 'You extract structured data from Indian GST tax invoices. Reply with ONLY valid JSON.' },
+        { role: 'user', content: textPrompt(ocrText, regexFields) },
       ],
-    }],
-    config: { maxOutputTokens: 1000, responseMimeType: 'application/json' },
+      response_format: { type: 'json_object' },
+      max_tokens: 8000,
+      temperature: 0,
+    }),
+    signal: AbortSignal.timeout(90_000),
+  });
+  if (!r.ok) {
+    const err = new Error(`${name} HTTP ${r.status}: ${(await r.text().catch(() => '')).slice(0, 200)}`);
+    err.status = r.status;
+    throw err;
+  }
+  const json = await r.json();
+  return extractJson(json?.choices?.[0]?.message?.content);
+}
+
+const viaDeepSeekText = (ocrText, regexFields) => chatJson(
+  'DeepSeek', 'https://api.deepseek.com/chat/completions',
+  process.env.DEEPSEEK_API_KEY, DEEPSEEK_MODEL, ocrText, regexFields,
+);
+
+const viaGroqText = (ocrText, regexFields) => chatJson(
+  'Groq', 'https://api.groq.com/openai/v1/chat/completions',
+  process.env.GROQ_API_KEY, GROQ_MODEL, ocrText, regexFields,
+);
+
+// Priority order: earlier providers win, later ones only fill empty fields.
+const PROVIDERS = [
+  { name: 'gemini', key: 'GEMINI_API_KEY', model: MODEL, run: (...a) => viaGeminiText(...a) },
+  { name: 'deepseek', key: 'DEEPSEEK_API_KEY', model: DEEPSEEK_MODEL, run: viaDeepSeekText },
+  { name: 'groq', key: 'GROQ_API_KEY', model: GROQ_MODEL, run: viaGroqText },
+];
+
+async function askGemini(parts) {
+  const res = await enqueue(() => client().models.generateContent({
+    model: MODEL,
+    contents: [{ role: 'user', parts }],
+    config: {
+      responseMimeType: 'application/json',
+      temperature: 0,
+      maxOutputTokens: 8192, // room for "thinking" + long item lists
+    },
   }));
 
-  return JSON.parse(res.text.trim());
+  const text = res.text ?? '';
+  if (!text.trim()) {
+    const reason = res.candidates?.[0]?.finishReason;
+    throw new Error(`Gemini returned empty response (finishReason: ${reason ?? 'unknown'})`);
+  }
+  return extractJson(text);
 }
 
-// ──────────────────────────── CLAUDE (optional) ────────────────────────────
-async function viaClaude(file, mimeType = 'application/pdf') {
-  const isImage = mimeType?.startsWith('image/');
-  const normalizedMime = mimeType === 'image/jpg' ? 'image/jpeg' : mimeType;
-  const contentBlock = isImage
-    ? { type: 'image', source: { type: 'base64', media_type: normalizedMime, data: fs.readFileSync(file).toString('base64') } }
-    : { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: fs.readFileSync(file).toString('base64') } };
-
-  const m = await new Anthropic().messages.create({
-    model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
-    max_tokens: 1000,
-    messages: [{
-      role: 'user',
-      content: [contentBlock, { type: 'text', text: PROMPT }],
-    }],
-  });
-  return JSON.parse(m.content.map((x) => x.text || '').join('').replace(/```json|```/g, '').trim());
-}
-
-// ──────────────────────────── TESSERACT ────────────────────────────
+// ──────────────────────────── Tesseract ────────────────────────────
 let workerPromise;
 const getWorker = () => (workerPromise ??= (async () => {
   const w = await Tesseract.createWorker('eng');
-  await w.setParameters({
-    tessedit_pageseg_mode: '6',
-    preserve_interword_spaces: '1',
-  });
+  await w.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' });
   return w;
 })());
 
-// Default preprocessing: grayscale, upscaled, contrast-normalised.
-async function preprocess(fileOrBuffer) {
-  return sharp(fileOrBuffer)
-    .rotate()
-    .grayscale()
-    .resize({ width: 2400 })
-    .normalise()
-    .sharpen()
-    .png()
-    .toBuffer();
-}
+// Grayscale, upscale, normalise contrast → much better OCR on phone photos.
+const preprocess = (input) => sharp(input)
+  .rotate().grayscale().resize({ width: 2400 }).normalise().sharpen().png().toBuffer();
 
-// Red-channel variant: makes red-on-white ink (IndianOil / LPG receipts) near-black.
-async function preprocessRed(fileOrBuffer) {
-  return sharp(fileOrBuffer)
-    .rotate()
-    .extractChannel('green')
-    .resize({ width: 2400 })
-    .normalise()
-    .sharpen()
-    .png()
-    .toBuffer();
-}
-
-// Render trimmed PDF pages to images and OCR them.
-async function ocrPdfPages(pdfBytes) {
-  const doc = await pdfToImg(pdfBytes, { scale: 2 });
+async function ocrImage(input) {
   const worker = await getWorker();
-  let out = '';
-  for await (const pageBuf of doc) {
-    const pre = await preprocess(pageBuf);
-    out += (await worker.recognize(pre)).data.text + '\n';
+  return (await worker.recognize(await preprocess(input))).data.text;
+}
+
+// A text layer that's mostly single characters is barcode/CMap garbage.
+function looksLikeGarbage(text) {
+  const tokens = String(text || '').split(/\s+/).filter(Boolean);
+  if (tokens.length < 30) return true;
+  return tokens.filter((t) => t.length === 1).length / tokens.length > 0.4;
+}
+
+// PDF: use the embedded text layer if it's usable, else render pages and OCR them.
+async function ocrPdf(bytes) {
+  try {
+    const text = (await pdfParse(bytes)).text;
+    if (!looksLikeGarbage(text)) return text;
+  } catch (e) {
+    console.warn('[tesseract] pdf-parse failed:', e.message);
   }
+  let out = '';
+  for await (const page of await pdfToImg(bytes, { scale: 2 })) out += `${await ocrImage(page)}\n`;
   return out;
 }
 
-async function viaTesseract(file, mimeType = 'application/pdf', trimmed = null) {
-  const normalized = mimeType === 'image/jpg' ? 'image/jpeg' : (mimeType || 'application/pdf');
-  const isPdf = normalized === 'application/pdf';
+async function ocrText(file, mimeType, trimmed) {
+  const text = mimeType?.startsWith('image/')
+    ? await ocrImage(file)
+    : await ocrPdf((trimmed ?? await trimPdf(file, 2, 2)).bytes);
+  const cleaned = String(text || '').replace(/[|]/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').trim();
+  if (process.env.DEBUG_OCR) console.log('=== OCR ===\n' + cleaned);
+  return cleaned;
+}
 
-  let raw;
-  if (isPdf && trimmed) {
-    raw = (await pdf(trimmed.bytes)).text;
-    const probe = cleanExtractedText(raw);
-    // If the PDF's text layer is garbage (image-only / broken CMap), render + OCR.
-    if (!probe || probe.isGarbage || probe.cleaned.length < 200) {
-      try {
-        raw = await ocrPdfPages(trimmed.bytes);
-      } catch (e) {
-        console.warn('pdf-to-img OCR fallback failed:', e.message);
-      }
+// ── regex parse of OCR text (fallback / gap-filler) ──
+const MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+const SLABS = [0, 0.25, 3, 5, 12, 18, 28];
+const snapSlab = (p) => SLABS.reduce((a, b) => (Math.abs(b - p) < Math.abs(a - p) ? b : a));
+
+// GSTIN layout: d d L L L L L d d d d L a Z a — fix common OCR digit/letter swaps.
+const GSTIN_LAYOUT = 'ddLLLLLddddLaZa';
+const OCR_TO_DIGIT = { O: '0', I: '1', L: '1', S: '5', B: '8', Z: '2', G: '6', D: '0', Q: '0', T: '7' };
+const OCR_TO_LETTER = { 0: 'O', 1: 'I', 5: 'S', 8: 'B', 2: 'Z', 6: 'G' };
+
+function repairGstin(tok) {
+  if (tok?.length !== 15) return '';
+  let out = '';
+  for (let i = 0; i < 15; i++) {
+    const ch = tok[i].toUpperCase();
+    const kind = GSTIN_LAYOUT[i];
+    out += kind === 'd' ? (OCR_TO_DIGIT[ch] || ch) : kind === 'L' ? (OCR_TO_LETTER[ch] || ch) : kind === 'Z' ? 'Z' : ch;
+  }
+  return VALID_GSTIN.test(out) ? out : '';
+}
+
+function findDate(text) {
+  const re = /(\d{1,2})[\s\-\/.]([A-Za-z]{3}|\d{1,2})[a-z]*[\s\-\/.](\d{4}|\d{2})\b/g;
+  for (const m of String(text || '').matchAll(re)) {
+    const d = +m[1];
+    const mo = isNaN(m[2]) ? MON[m[2].toLowerCase()] : +m[2];
+    let y = +m[3]; if (y < 100) y += 2000;
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && y >= 2000 && y <= 2100) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     }
-  } else if (isPdf) {
-    raw = (await pdf(fs.readFileSync(file))).text;
-  } else {
-    const worker = await getWorker();
-    const [grayText, redText, headerText] = await Promise.all([
-      preprocess(file).then((buf) => worker.recognize(buf)).then((r) => r.data.text),
-      preprocessRed(file).then((buf) => worker.recognize(buf)).then((r) => r.data.text).catch(() => ''),
-      ocrHeaderRegion(file).catch((e) => { console.warn('header OCR failed:', e.message); return ''; }),
-    ]);
-    if (process.env.DEBUG_OCR) console.log('=== HEADER OCR ===\n' + headerText);
-    raw = headerText + '\n' + grayText + '\n' + redText;
   }
+  return '';
+}
 
-  const parsed = cleanExtractedText(raw);
-  if (!parsed) return null;
-  const { cleaned: text, isGarbage } = parsed;
-  if (process.env.DEBUG_OCR) console.log(text);
+// Bill / invoice number. Covers "Invoice No", "Bill No", "Inv. No.", "Invoice #",
+// "Bill Number", "Receipt No", "Voucher No", "Document No", "Ref No"…, with the
+// value on the same line or the next one. Value must contain a digit and not be a date.
+const INVOICE_LABEL = String.raw`(?:Tax\s*)?(?:Invoice|Inv|Bill|Receipt|Voucher|Document|Doc|Ref(?:erence)?)\.?\s*(?:No\.?|Num(?:ber)?\.?|#|Id)`;
+const INVOICE_VALUE = String.raw`([A-Z0-9][A-Z0-9\/\-_.]{0,29})`;
+const INVOICE_PATTERNS = [
+  new RegExp(`\\b${INVOICE_LABEL}\\s*[:#.\\-]?[ \\t]*${INVOICE_VALUE}`, 'gi'),       // same line
+  new RegExp(`\\b${INVOICE_LABEL}\\s*[:#.\\-]?[ \\t]*\\n[ \\t]*${INVOICE_VALUE}`, 'gi'), // next line
+  /\b([A-Z]{2,6}\/\d{2}-\d{2}\/\d{3,})\b/g,  // YCS/26-27/028915
+  /\b([A-Z]{2,5}-?\d{2,4}[\/-]\d{3,})\b/g,       // INV-2024/0012
+];
 
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-
-  // ── vendor_name ──
-  let vendor_name = guessVendorFromText(text);
-  if (!vendor_name) {
-    const ci = lines.findIndex((l) => /^Consignee/i.test(l));
-    if (ci > 0) vendor_name = lines[ci - 1];
-    if (!vendor_name)
-      vendor_name = (text.match(/A\/c Holder'?s Name\s*:\s*(.+)/i) || text.match(/^for\s+(.+)$/im) || [])[1] || '';
+function pickInvoiceNo(text) {
+  if (!text) return '';
+  for (const re of INVOICE_PATTERNS) {
+    for (const m of text.matchAll(re)) {
+      const v = m[1].replace(/[.\-\/]+$/, '').toUpperCase();
+      if (/\d/.test(v) && !findDate(v) && !VALID_GSTIN.test(v)) return v;
+    }
   }
-  vendor_name = vendor_name.split(/\s{2,}/)[0].replace(/\s*Invoice\s*#?.*$/i, '').trim();
+  return '';
+}
 
-  // ── gstin(s) ──
-  const gstins = extractGstins(text);
-  const gstin = pickSellerGstin(text, gstins);
+function parseOcr(text) {
+  if (!text) return null;
+  const money = (s) => Number(String(s).replace(/,/g, '')) || 0;
 
-  // ── invoice_no ──
+  const gstins = [...new Set(
+    (text.match(/\b[0-9A-Za-z]{15}\b/g) || []).map(repairGstin).filter(Boolean),
+  )];
+  // Seller = GSTIN next to a plain "GSTIN" label (not "GSTIN Cust"), else the first one.
+  const sellerTok = /\bGSTIN\b(?!\s*:?\s*Cust)[\s:\-]*([0-9A-Za-z]{15})/i.exec(text)?.[1];
+  const gstin = repairGstin(sellerTok) || gstins[0] || '';
+
   const invoice_no = pickInvoiceNo(text);
 
-  // ── date ──
-  const dated = (text.match(/(?:Dated|Date|Invoice\s*Date)[\s\S]{0,80}/i) || [''])[0];
-  const date = findDate(dated) || findDate(text);
+  const dateLine = /(?:Invoice\s*Date|Date)\s*[:\-]?\s*([^\n]{0,30})/i.exec(text)?.[1];
+  const date = findDate(dateLine) || findDate(text);
 
-  // ── line_items ──
-  // Try Tally/HSN pattern: S.No  Name  HSN-code  Qty  UOM  ...amounts
-  const line_items = [];
-  for (const line of lines) {
-    // Classic Tally: 1  Item Name  12345678  10  NOS  100.00  1000.00
-    const m = line.match(/^(\d{1,2})\s+(.+?)\s+(\d{4,8})\s+([\d,.]+)\s*([A-Za-z]{2,5})\b(.*)$/);
-    if (m) {
-      const quantity = num(m[4]);
-      const nums = (m[6].match(MONEY) || []).map(num);
-      if (quantity && nums.length) {
-        const amount = nums[nums.length - 1];
-        let rate = nums.length >= 2 ? nums[nums.length - 2] : 0;
-        if (!rate || Math.abs(rate * quantity - amount) > 1) rate = +(amount / quantity).toFixed(2);
-        line_items.push({ name: m[2].trim(), quantity, rate });
-        continue;
-      }
-    }
-    // Generic: look for lines that contain a Price/Rate/Sub-Total amount pattern
-    // e.g. "  1   LPG Cylinder    1   800.00"
-    const mg = line.match(/^(\d{1,3})\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([\d,]+\.\d{2})$/);
-    if (mg) {
-      const quantity = num(mg[3]);
-      const amount = num(mg[4]);
-      if (quantity && amount) {
-        const rate = +(amount / quantity).toFixed(2);
-        line_items.push({ name: mg[2].trim(), quantity, rate });
-      }
-    }
-  }
+  const rate = (re) => +(re.exec(text)?.[1] || 0);
+  const igst = rate(/IGST\s*@?\s*\(?(\d+(?:\.\d+)?)/i);
+  const cgst = rate(/CGST\s*@?\s*\(?(\d+(?:\.\d+)?)/i);
+  const sgst = rate(/SGST\s*@?\s*\(?(\d+(?:\.\d+)?)/i);
+  let tax_percent = 0; let tax_name = '';
+  if (igst) { tax_percent = snapSlab(igst); tax_name = `IGST${tax_percent}`; }
+  else if (cgst && sgst) { tax_percent = snapSlab(cgst + sgst); tax_name = `CGST${tax_percent / 2}+SGST${tax_percent / 2}`; }
 
-  // ── total ──
-  const total = pickTotal(text, lines);
+  const totalM = /(?:Grand\s*Total|Net\s*Payable|Balance\s*Due|Total\s*Amount|^\s*Total)\b[^\d\n]*([\d,]+\.\d{2})/im.exec(text);
+  const amounts = (text.match(/\d[\d,]*\.\d{2}/g) || []).map(money);
+  const total = totalM ? money(totalM[1]) : (amounts.length ? Math.max(...amounts) : 0);
 
-  // ── tax info ──
-  const taxInfo = guessTaxInfo(text);
-  let { tax_percent, tax_name } = taxInfo;
-  if (!tax_percent) {
-    const taxable = line_items.reduce((s, i) => s + i.quantity * i.rate, 0);
-    if (taxable && total > taxable) tax_percent = ((total - taxable) / taxable) * 100;
-    tax_percent = snapSlab(tax_percent);
-  }
-
-  return { vendor_name, gstin, gstins, invoice_no, date, line_items, tax_percent, tax_name, total, _garbage: isGarbage };
+  return { gstin, gstins, invoice_no, date, tax_percent, tax_name, total };
 }
 
-// ──────────────────────────── REGEX ────────────────────────────
-async function viaRegex(file, trimmed) {
-  const raw = (await pdf(trimmed.bytes)).text;
-  const parsed = cleanExtractedText(raw);
-  if (!parsed) return null;
-  const { cleaned: t } = parsed;
+// Combine two normalised results: keep `primary`, fill its empty fields from `secondary`.
+// Returns the merged result and the list of fields taken from `secondary`.
+function combine(primary, secondary) {
+  const out = { ...primary };
+  const filled = [];
+  for (const [k, v] of Object.entries(secondary)) {
+    if (k === 'gstins') continue;
+    const empty = Array.isArray(out[k]) ? out[k].length === 0 : !out[k];
+    const has = Array.isArray(v) ? v.length > 0 : Boolean(v);
+    if (empty && has) { out[k] = v; filled.push(k); }
+  }
+  out.gstins = [...new Set([...(primary.gstins || []), ...(secondary.gstins || [])])];
+  return { data: out, filled };
+}
 
-  const invoice_no = pickInvoiceNo(t);
+// Keep the AI values; fill only what they left empty from the regex parse.
+function fillGaps(primary, ocr) {
+  if (!ocr) return primary;
+  const out = { ...primary };
+  for (const k of ['gstin', 'invoice_no', 'date', 'tax_name', 'tax_percent', 'total']) {
+    if (!out[k] && ocr[k]) out[k] = ocr[k];
+  }
+  out.gstins = [...new Set([...(out.gstins || []), ...(ocr.gstins || [])])];
+  return out;
+}
 
-  const rawDate =
-    (/(?:Dated|Date|Invoice\s*Date)\s*[:\-]?\s*(\d{1,2}[\-\/ ][A-Za-z0-9]{2,}[\-\/ ]\d{2,4})/i.exec(t) || [])[1] || '';
-  const date = iso(rawDate) || findDate(rawDate) || '';
+// ──────────────────────────── normalise ────────────────────────────
+function normalise(raw) {
+  const r = raw || {};
 
-  const vendor_name = guessVendorFromText(t);
-  const gstins = extractGstins(t);
-  const gstin = pickSellerGstin(t, gstins);
-  const total = pickTotal(t);
-  const { tax_percent, tax_name } = guessTaxInfo(t);
+  const allGstins = [...new Set(
+    [...(Array.isArray(r.gstins) ? r.gstins : []), ...(r.gstin ? [r.gstin] : [])]
+      .filter((v) => typeof v === 'string' && VALID_GSTIN.test(v.trim()))
+      .map((v) => v.trim().toUpperCase()),
+  )];
 
-  // Legacy HSN line-item pattern.
-  const li = /(\d{6,8})\s+(\d+)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,]+\.\d{2})/.exec(t);
-  const name = /\n\s*1\s+(.+?)\s+\d{6,8}\s/.exec(t);
+  const gstin = typeof r.gstin === 'string' && VALID_GSTIN.test(r.gstin.trim())
+    ? r.gstin.trim().toUpperCase()
+    : allGstins[0] || '';
+
+  const num = (v) => Number(String(v ?? '').replace(/[₹,\s]/g, '')) || 0;
 
   return {
-    vendor_name,
-    gstin,
-    gstins,
-    invoice_no,
-    date,
-    line_items: li ? [{ name: name?.[1] || 'Goods/Services', quantity: num(li[2]), rate: num(li[4]) }] : [],
-    tax_percent,
-    tax_name,
-    total,
-  };
-}
-
-// ──────────────────────────── MERGE ────────────────────────────
-function pick(...vals) {
-  for (const v of vals) {
-    if (v == null) continue;
-    if (typeof v === 'string' && !v.trim()) continue;
-    if (typeof v === 'number' && (!Number.isFinite(v) || v === 0)) continue;
-    return v;
-  }
-  return vals.find((v) => v != null) ?? '';
-}
-
-function pickGstin(...vals) {
-  const valid = vals.find((v) => typeof v === 'string' && VALID_GSTIN.test(v.trim()));
-  return (valid || pick(...vals) || '').toUpperCase();
-}
-
-// ── Focused OCR of the top band of an image (letterhead region) ──
-// Runs three preprocessing variants and concatenates the results so
-// the caller can find the vendor banner and seller GSTIN even when the
-// full-page OCR missed them.
-async function ocrHeaderRegion(file, topFrac = 0.35) {
-  const meta = await sharp(file).rotate().metadata();
-  const W = meta.width;
-  const H = meta.height;
-  const hh = Math.max(240, Math.floor(H * topFrac));
-
-  const base = sharp(file).rotate().extract({ left: 0, top: 0, width: W, height: hh });
-
-  // (A) green channel + hard threshold — red ink -> near-black, light blue -> white
-  const vA = await base.clone().extractChannel('green')
-    .resize({ width: 3200 }).normalise().sharpen().threshold(170).png().toBuffer();
-
-  // (B) grayscale + threshold — best when the header is already black ink
-  const vB = await base.clone().grayscale()
-    .resize({ width: 3200 }).normalise().sharpen().threshold(150).png().toBuffer();
-
-  // (C) grayscale, no threshold — softer, keeps anti-aliased red ink
-  const vC = await base.clone().grayscale()
-    .resize({ width: 3200 }).normalise().sharpen().png().toBuffer();
-
-  const worker = await getWorker();
-  const parts = await Promise.all([vA, vB, vC].map(async (buf) => {
-    try { return (await worker.recognize(buf)).data.text; } catch { return ''; }
-  }));
-  return parts.join('\n');
-}
-
-// Strip an accidental "Invoice# " prefix that sometimes leaks into vendor_name.
-const cleanVendor = (v) => typeof v === 'string' ? v.replace(/^\s*Invoice\s*#?.*$/i, '').trim() : v;
-
-function mergeResults(gem, tess, reg) {
-  const g = gem || {};
-  const t = tess || {};
-  const r = reg || {};
-
-  // Debug dump (kept on for now — comment out if noisy).
-  // console.log('gemini ', g);
-  // console.log('tess   ', t);
-  // console.log('regex  ', r);
-
-  // Seller GSTIN: prefer the explicit `gstin` from any source, then fall back
-  // to the first element of any `gstins` array.
-  const gstin = pickGstin(
-    g.gstin, t.gstin, r.gstin,
-    (g.gstins || [])[0], (t.gstins || [])[0], (r.gstins || [])[0]
-  );
-
-  // All GSTINs: union from every source, validate, normalise case.
-  const allGstins = [...new Set([
-    ...(g.gstins || []),
-    ...(t.gstins || []),
-    ...(r.gstins || []),
-    ...(g.gstin ? [g.gstin] : []),
-    ...(t.gstin ? [t.gstin] : []),
-    ...(r.gstin ? [r.gstin] : []),
-  ])]
-    .filter((v) => typeof v === 'string' && VALID_GSTIN.test(v.trim()))
-    .map((v) => v.toUpperCase());
-
-  return {
-    vendor_name: cleanVendor(pick(g.vendor_name, t.vendor_name, r.vendor_name)),
+    vendor_name: typeof r.vendor_name === 'string'
+      ? r.vendor_name.replace(/^\s*Invoice\s*#?.*$/i, '').trim()
+      : '',
     gstin,
     gstins: allGstins,
-    invoice_no: pick(g.invoice_no, t.invoice_no, r.invoice_no),
-    date: pick(g.date, t.date, r.date),
-    tax_percent: pick(g.tax_percent, t.tax_percent, r.tax_percent),
-    tax_name: pick(g.tax_name, t.tax_name, r.tax_name) || '',
-    tax_amount: pick(g.tax_amount, t.tax_amount, r.tax_amount),
-    discount_amount: pick(g.discount_amount, t.discount_amount, r.discount_amount) || 0,
-    discount_percent: pick(g.discount_percent, t.discount_percent, r.discount_percent) || 0,
-    total: pick(g.total, t.total, r.total),
-    line_items: g.line_items?.length ? g.line_items
-      : t.line_items?.length ? t.line_items
-        : (r.line_items || []),
-    _sources: {
-      gemini: !!gem,
-      tesseract: !!tess,
-      regex: !!reg,
-      garbagePdf: !!(tess && tess._garbage),
-    },
+    invoice_no: String(r.invoice_no || '').trim(),
+    date: r.date || '',
+    tax_percent: num(r.tax_percent),
+    tax_name: r.tax_name || '',
+    tax_amount: num(r.tax_amount),
+    discount_amount: num(r.discount_amount),
+    discount_percent: num(r.discount_percent),
+    total: num(r.total),
+    line_items: Array.isArray(r.line_items)
+      ? r.line_items.map((it) => ({
+        name: it?.name || '',
+        quantity: num(it?.quantity),
+        rate: num(it?.rate),
+      }))
+      : [],
   };
 }
 
-// ──────────── DeepSeek (text-only fallback via pdf-parse) ────────────
-async function viaDeepSeek(file, mimeType = 'application/pdf', trimmed = null) {
-  if (mimeType?.startsWith('image/')) {
-    throw new Error('DeepSeek does not support image input');
+// A result worth caching has at least some real content.
+function isUseful(d) {
+  return Boolean(d.gstin || d.invoice_no || d.total);
+}
+
+// ──────────────────────────── entry ────────────────────────────
+const inFlight = new Map(); // hash → Promise, so identical uploads share one call
+
+/**
+ * Full result with metadata.
+ * @param {{ pages?: 'trim'|'all' }} opts  PDF only: 'trim' = first 2 + last 2 pages (default), 'all' = every page.
+ *   The two modes are cached separately, so the same PDF can be compared in both.
+ * @returns {{ data, source: 'cache'|'gemini'|'deepseek'|'groq'|'tesseract'|'failed', duplicate: boolean, hash: string }}
+ *   source = the highest-priority AI that answered (lower ones may have filled gaps).
+ *   pdfPages = { mode, read, total } for PDFs (read/total missing on a cache hit).
+ *   duplicate = true → this file or this seller + invoice no was already
+ *               processed; data is the earlier saved copy.
+ */
+export async function extractWithMeta(file, mimeType = 'application/pdf', { pages = 'trim' } = {}) {
+  if (!PROVIDERS.some((p) => process.env[p.key])) {
+    throw new Error(`Missing all AI keys (${PROVIDERS.map((p) => p.key).join(', ')})`);
   }
 
-  const bytes = trimmed ? trimmed.bytes : fs.readFileSync(file);
-  const { text } = await pdf(bytes);
-  if (!text || text.trim().length < 20) {
-    throw new Error('No extractable text in PDF for DeepSeek');
+  const isPdf = !mimeType?.startsWith('image/');
+  const allPages = isPdf && pages === 'all';
+  const ns = allPages ? ':all' : ''; // whole-PDF results live in their own cache slots
+  const hash = fileHash(file);
+  const cacheKey = hash + ns;
+  let pdfPages = isPdf ? { mode: allPages ? 'all' : 'trim' } : undefined;
+
+  // 1. Exact same file seen before → no API call
+  const cached = USE_CACHE && store.getByHash(cacheKey);
+  if (cached) {
+    console.log(`[extract] cache hit ${cacheKey.slice(0, 10)}${ns}`);
+    return { data: cached, source: 'cache', duplicate: true, hash, pdfPages };
   }
 
-  const data = await withRetry(async () => {
-    const r = await fetch('https://api.deepseek.com/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
-        messages: [
-          {
-            role: 'system',
-            content: 'You extract structured data from Indian GST tax invoices. Reply with ONLY valid JSON, no markdown fences.',
-          },
-          { role: 'user', content: `${PROMPT}\n\n---INVOICE TEXT---\n${text}` },
-        ],
-        response_format: { type: 'json_object' },
-        max_tokens: 2000,
-        temperature: 0,
-      }),
+  // 2. Same file already being processed right now → wait for that call
+  if (inFlight.has(cacheKey)) return inFlight.get(cacheKey);
+
+  const job = (async () => {
+    // PDF bytes handed to OCR: first 2 + last 2 pages, or the whole file
+    let trimmed = null;
+    if (allPages) {
+      const raw = fs.readFileSync(file);
+      const total = await PDFDocument.load(raw, { ignoreEncryption: true })
+        .then((d) => d.getPageCount()).catch(() => undefined);
+      trimmed = { bytes: raw, total, kept: total };
+    } else if (isPdf) {
+      trimmed = await trimPdf(file, 2, 2);
+    }
+    if (isPdf) {
+      pdfPages = { ...pdfPages, read: trimmed.kept, total: trimmed.total };
+      console.log(`[extract] PDF pages (${pdfPages.mode}): ${pdfPages.read ?? '?'} / ${pdfPages.total ?? '?'}`);
+    }
+
+    // 1. Tesseract: all text from the document
+    let ocr = '';
+    try {
+      ocr = await ocrText(file, mimeType, trimmed);
+      console.log(`[tesseract] ${ocr.length} chars`);
+    } catch (e) {
+      console.warn('[tesseract] FAILED:', e.message);
+    }
+    if (!ocr) return { data: normalise(null), source: 'failed', duplicate: false, hash, pdfPages };
+
+    // 2. Regex: pre-extract fields from that text
+    const ocrParsed = parseOcr(ocr);
+    if (ocrParsed) console.log('[regex]', ocrParsed);
+
+    // 3. All AIs in parallel: text in → fields out (one attempt each, no document)
+    const active = PROVIDERS.filter((p) => process.env[p.key]);
+    console.log('[extract] AI (ocr text):', Object.fromEntries(
+      PROVIDERS.map((p) => [p.name, process.env[p.key] ? p.model : 'off']),
+    ));
+
+    const settled = await Promise.allSettled(active.map((p) => p.run(ocr, ocrParsed)));
+
+    // 4. Combine in priority order: Gemini → DeepSeek → Groq (→ regex below)
+    let data;
+    let source;
+    settled.forEach((res, i) => {
+      const { name } = active[i];
+      if (res.status === 'rejected') {
+        console.error(`[${name}] FAILED:`, res.reason?.status ?? '', res.reason?.message);
+        return;
+      }
+      const result = normalise(res.value);
+      console.log(`[${name}] result:`, JSON.stringify(result, null, 2));
+      if (!data) {
+        data = result;
+        source = name;
+        return;
+      }
+      const merged = combine(data, result);
+      if (merged.filled.length) console.log(`[extract] filled from ${name}:`, merged.filled.join(', '));
+      data = merged.data;
     });
 
-    if (!r.ok) {
-      const body = await r.text().catch(() => '');
-      const err = new Error(`DeepSeek HTTP ${r.status}: ${body.slice(0, 200)}`);
-      err.status = r.status;
-      throw err;
+    if (data) {
+      data = normalise(fillGaps(data, ocrParsed));
+    } else {
+      data = normalise(ocrParsed);
+      source = isUseful(data) ? 'tesseract' : 'failed';
+      if (source === 'failed') return { data, source, duplicate: false, hash, pdfPages };
+      console.log('[extract] using Tesseract fallback');
     }
-    return r.json();
-  });
 
-  const content = data?.choices?.[0]?.message?.content || '{}';
-  return JSON.parse(content.replace(/```json|```/g, '').trim());
+    // Don't cache empty or OCR-only results, so re-uploading can still reach the AI
+    if (!USE_CACHE || !isUseful(data) || source === 'tesseract') {
+      return { data, source, duplicate: false, hash, pdfPages };
+    }
+
+    // 3. Same bill as an earlier, different file (re-scan / re-photo)
+    const key = invoiceKey(data) && invoiceKey(data) + ns;
+    const earlier = key && store.getByInvoice(key);
+
+    store.save(cacheKey, key, earlier ? earlier.data : data);
+
+    if (earlier) {
+      console.log(`[extract] duplicate bill ${key}`);
+      return { data: earlier.data, source, duplicate: true, hash, pdfPages };
+    }
+    return { data, source, duplicate: false, hash, pdfPages };
+  })();
+
+  inFlight.set(cacheKey, job);
+  try {
+    return await job;
+  } finally {
+    inFlight.delete(cacheKey);
+  }
 }
 
-
-// ──────────────────────────── ENTRY ────────────────────────────
-export async function extract(file, mimeType = 'application/pdf') {
-  const isPdf = !mimeType?.startsWith('image/');
-  const trimmed = isPdf ? await trimPdf(file, 2, 2) : null;
-
-  // Run all extractors in parallel; isolate failures.
-  const [gem, tess, reg] = await Promise.all([
-    process.env.GEMINI_API_KEY
-      ? viaGemini(file, mimeType, trimmed).catch((e) => { console.warn('Gemini failed:', e.message); return null; })
-      : Promise.resolve(null),
-
-    viaTesseract(file, mimeType, trimmed).catch((e) => { console.warn('Tesseract failed:', e.message); return null; }),
-
-    isPdf
-      ? viaRegex(file, trimmed).catch((e) => { console.warn('Regex failed:', e.message); return null; })
-      : Promise.resolve(null),
-
-    // Uncomment if you want Claude as another source (highest priority — reorder below):
-    // process.env.ANTHROPIC_API_KEY
-    //   ? viaClaude(file, mimeType).catch(e => { console.warn('Claude failed:', e.message); return null; })
-    //   : Promise.resolve(null),
-  ]);
-
-  return mergeResults(gem, tess, reg);
+/** Same signature and return shape as before: just the extracted data. */
+export async function extract(file, mimeType = 'application/pdf', opts = {}) {
+  const { data } = await extractWithMeta(file, mimeType, opts);
+  console.log('grok data', data);
+  return data;
 }
 
-// Re-exports for testing.
-export {
-  viaGemini, viaTesseract, viaRegex, viaClaude, trimPdf, mergeResults,
-  guessVendorFromText, pickSellerGstin, pickInvoiceNo, pickTotal, guessTaxPercent, guessTaxInfo,
-  extractGstins, repairGstinCandidate,
-};
+export { viaGeminiText, viaDeepSeekText, viaGroqText, combine, trimPdf, normalise, ocrText, parseOcr };

@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { Bill, VendorAccountMap, User, FinanceOrg } from '../models.js';
 import { auth } from '../mw.js';
-import { extract } from '../extract.js';
+import { extractWithMeta } from '../extract.js';
 import * as zoho from '../zoho.js';
 const r = Router();
 const up = multer({
@@ -22,10 +22,14 @@ const pick = b => Object.fromEntries(FIELDS.map(k => [k, b[k]]));
 r.post('/extract', auth('PM'), up.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'PDF or image file required' });
   try {
+    // pages: 'trim' (first 2 + last 2, default) | 'all' — PDF only
+    const pages = req.body.pages === 'all' ? 'all' : 'trim';
+    const { data, source, pdfPages } = await extractWithMeta(req.file.path, req.file.mimetype, { pages });
     res.json({
       pdfFile: req.file.filename,
       fileType: req.file.mimetype,
-      extracted: await extract(req.file.path, req.file.mimetype)
+      extracted: data,
+      extractMeta: { source, pdfPages },
     });
   } catch (e) {
     res.json({
