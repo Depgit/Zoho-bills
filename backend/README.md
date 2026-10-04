@@ -45,6 +45,7 @@ scoped to it. Each FinanceOrg has its own Zoho credentials.
 | `extract.js` | Bill reading: OCR + AI extraction |
 | `files.js` | GridFS file storage (save, read, stream, delete, find unused) |
 | `gst.js` | GSTIN → state table and the GST vs IGST rule (`taxPlan`) |
+| `learn.js` | Learns from PM corrections: extraction log, vendor memory, few-shot examples (`ExtractionLog` collection) |
 | `data/extract-store.json` | Extraction cache (by file hash and by GSTIN + invoice number) |
 
 ## API
@@ -80,6 +81,19 @@ All routes except register and login need `Authorization: Bearer <jwt>`.
 3. **Regex:** picks out GSTIN, invoice number, date, tax % and total.
 4. **AI:** Gemini, DeepSeek and Groq get the text in parallel. The **first usable result wins** and the others aren't waited for. If every AI fails, the regex result is used.
 5. **Single line:** the PM form turns all extracted items into one line, with rate = the sum of qty × rate before tax.
+
+### Learning from corrections (`learn.js`)
+No model training. Each extraction is logged, then compared with what the PM actually submitted.
+- **Logging:**
+  - `POST /extract` saves the scanned text (up to 8 KB), the raw AI output and which provider answered. The log is keyed by `financeOrgId` and `fileId` (= `pdfFile`).
+  - `POST /` and `PUT /:id` save the submitted values and the corrections, field by field: vendor name, GSTIN, invoice no, date, tax % and subtotal.
+- **Finding earlier bills:** by vendor GSTIN, or by how similar the scanned text is. Text similarity matters when the vendor GSTIN isn't readable, for example a receipt that only shows the buyer's GSTIN.
+- **Your own GSTINs:** a GSTIN that PMs corrected away from at least 2 times is treated as the company's own. It's never used as the vendor GSTIN, and the AI prompt is told so.
+- **Examples in the prompt:** up to 3 of the most similar earlier approved bills.
+- **Vendor memory:** if `vendor_name` or `tax_percent` was corrected to the same value at least 2 times, that value is applied.
+- **Same document uploaded again:** if the text is at least 85% similar and the AI read the same invoice number, the whole corrected result is reused, including the invoice number and date.
+- **Scope:** every lookup is limited to the same `financeOrgId`. Logs never submitted are auto-deleted after 30 days.
+- **Safety:** errors are logged and never block extract or submit.
 
 ### File storage (`files.js`)
 - Files are stored in MongoDB GridFS (bucket `billFiles`), and `Bill.pdfFile` holds the GridFS id. Local disk on Render is wiped on every deploy, which is why files aren't kept there.

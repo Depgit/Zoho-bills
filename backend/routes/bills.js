@@ -8,6 +8,7 @@ import { extractWithMeta } from '../extract.js';
 import * as zoho from '../zoho.js';
 import { taxPlan } from '../gst.js';
 import { saveFile, fileExists, streamFile, readFile, deleteFile } from '../files.js';
+import * as learn from '../learn.js';
 const r = Router();
 const up = multer({
   dest: os.tmpdir(),                    // temp only — moved into GridFS after extraction
@@ -21,13 +22,26 @@ const del = deleteFile;
 const FIELDS = ['vendorId', 'vendorName', 'billNumber', 'date', 'dueDate', 'lineItems', 'extracted', 'fileType', 'discount_amount', 'discount_percent', 'location_id', 'source_of_supply'];
 const pick = b => Object.fromEntries(FIELDS.map(k => [k, b[k]]));
 
+// Vendor GSTIN for learning: Zoho contact first, else what was extracted
+const vendorGstinOf = async (financeOrgId, bill) =>
+  (await Contact.findOne({ financeOrgId, contact_id: bill.vendorId }, 'gst_no').lean())?.gst_no || bill.extracted?.gstin || '';
+
+// Record what the PM finally submitted vs what the AI read (learn.js) — never blocks the response
+const learnFinal = (financeOrgId, bill) => vendorGstinOf(financeOrgId, bill)
+  .then(vendorGstin => learn.recordFinal({ financeOrgId, fileId: String(bill.pdfFile), bill, vendorGstin }))
+  .catch(e => console.error('[learn] final', e.message));
+
 r.post('/extract', auth('PM'), up.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'PDF or image file required' });
   // Store in GridFS while extraction runs — no extra wait for the upload
   const saving = saveFile(req.file.path, req.file.originalname, req.file.mimetype);
   // pages: 'trim' (first 2 + last 2, default) | 'all' — PDF only
   const pages = req.body.pages === 'all' ? 'all' : 'trim';
-  const extracting = extractWithMeta(req.file.path, req.file.mimetype, { pages });
+  const orgId = req.user.financeOrgId;
+  // Few-shot: earlier approved invoices like this one (same vendor GSTIN or similar text) go into the AI prompt
+  const fewShot = async (regex, ocrText) =>
+    learn.buildFewShotBlock(await learn.getExamples(orgId, { gstins: [regex?.gstin, ...(regex?.gstins || [])], ocrText }));
+  const extracting = extractWithMeta(req.file.path, req.file.mimetype, { pages, fewShot });
   extracting.catch(() => { });          // awaited below; avoid unhandled rejection if save fails first
   let pdfFile;
   try {
@@ -38,12 +52,17 @@ r.post('/extract', auth('PM'), up.single('file'), async (req, res) => {
     return res.status(500).json({ error: 'Could not store file: ' + e.message });
   }
   try {
-    const { data, source, pdfPages } = await extracting;
+    const { data, source, pdfPages, ocrText } = await extracting;
+    // Vendor memory: fields PMs keep correcting the same way for this vendor
+    const hints = await learn.getVendorHints(orgId, { gstins: [data?.gstin, ...(data?.gstins || [])], ocrText, aiGstin: data?.gstin, aiInvoiceNo: data?.invoice_no });
+    const extracted = learn.applyVendorHints(data, hints);
+    // Log the raw AI output (before hints) so corrections keep being counted
+    if (orgId) learn.saveExtraction({ financeOrgId: orgId, fileId: pdfFile, ocrText, aiOutput: data, provider: source, vendorGstin: data?.gstin });
     res.json({
       pdfFile,
       fileType: req.file.mimetype,
-      extracted: data,
-      extractMeta: { source, pdfPages },
+      extracted,
+      extractMeta: { source, pdfPages, ...(Object.keys(hints).length ? { hints } : {}) },
     });
   } catch (e) {
     res.json({
@@ -79,6 +98,7 @@ r.post('/', auth('PM'), async (req, res) => {
     source_of_supply: pmUser?.source_of_supply || '',
     history: [{ by: req.user.name, action: 'SUBMITTED' }]
   });
+  learnFinal(bill.financeOrgId, bill);
   res.json(bill);
 });
 
@@ -103,7 +123,9 @@ r.put('/:id', auth('PM'), async (req, res) => {
     return res.status(400).json({ error: 'Bill file is missing — please re-upload the bill' });
   Object.assign(bill, pick(req.body), { status: 'PENDING_L1', zohoError: null });
   bill.history.push({ by: req.user.name, action: wasRejected ? 'RESUBMITTED' : 'EDITED' });
-  res.json(await bill.save());
+  await bill.save();
+  learnFinal(bill.financeOrgId, bill);
+  res.json(bill);
 });
 
 // PM deletes a rejected or pending bill

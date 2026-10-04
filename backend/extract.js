@@ -211,21 +211,23 @@ characters (O↔0, I↔1, S↔5, B↔8) and break table rows across lines — us
 If a field is genuinely not in the text, leave it empty / 0.\n\n`;
 
 // Same text prompt for Gemini and DeepSeek.
-function textPrompt(ocrText, regexFields) {
+// `examples`: few-shot block of earlier approved invoices from this vendor (learn.js), or ''
+function textPrompt(ocrText, regexFields, examples = '') {
   return TEXT_INTRO + PROMPT
+    + (examples ? `\n\n${examples}` : '')
     + `\n\nFields pre-extracted by regex (may be wrong or incomplete — verify against the text):\n${JSON.stringify(regexFields ?? {}, null, 2)}`
     + `\n\nDocument text (Tesseract OCR):\n-----\n${ocrText.slice(0, 30000)}\n-----`;
 }
 
-async function viaGeminiText(ocrText, regexFields) {
-  return askGemini([{ text: textPrompt(ocrText, regexFields) }]);
+async function viaGeminiText(ocrText, regexFields, examples) {
+  return askGemini([{ text: textPrompt(ocrText, regexFields, examples) }]);
 }
 
 // ─────────────────── DeepSeek / Groq (OpenAI-compatible) ───────────────────
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
 const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 
-async function chatJson(name, url, apiKey, model, ocrText, regexFields) {
+async function chatJson(name, url, apiKey, model, ocrText, regexFields, examples) {
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -233,7 +235,7 @@ async function chatJson(name, url, apiKey, model, ocrText, regexFields) {
       model,
       messages: [
         { role: 'system', content: 'You extract structured data from Indian GST tax invoices. Reply with ONLY valid JSON.' },
-        { role: 'user', content: textPrompt(ocrText, regexFields) },
+        { role: 'user', content: textPrompt(ocrText, regexFields, examples) },
       ],
       response_format: { type: 'json_object' },
       max_tokens: 8000,
@@ -250,14 +252,14 @@ async function chatJson(name, url, apiKey, model, ocrText, regexFields) {
   return extractJson(json?.choices?.[0]?.message?.content);
 }
 
-const viaDeepSeekText = (ocrText, regexFields) => chatJson(
+const viaDeepSeekText = (ocrText, regexFields, examples) => chatJson(
   'DeepSeek', 'https://api.deepseek.com/chat/completions',
-  process.env.DEEPSEEK_API_KEY, DEEPSEEK_MODEL, ocrText, regexFields,
+  process.env.DEEPSEEK_API_KEY, DEEPSEEK_MODEL, ocrText, regexFields, examples,
 );
 
-const viaGroqText = (ocrText, regexFields) => chatJson(
+const viaGroqText = (ocrText, regexFields, examples) => chatJson(
   'Groq', 'https://api.groq.com/openai/v1/chat/completions',
-  process.env.GROQ_API_KEY, GROQ_MODEL, ocrText, regexFields,
+  process.env.GROQ_API_KEY, GROQ_MODEL, ocrText, regexFields, examples,
 );
 
 // Priority order: earlier providers win, later ones only fill empty fields.
@@ -504,7 +506,8 @@ const inFlight = new Map(); // hash → Promise, so identical uploads share one 
  *   duplicate = true → this file or this seller + invoice no was already
  *               processed; data is the earlier saved copy.
  */
-export async function extractWithMeta(file, mimeType = 'application/pdf', { pages = 'trim' } = {}) {
+// fewShot: optional async (regexFields, ocrText) => prompt block of earlier examples for this vendor
+export async function extractWithMeta(file, mimeType = 'application/pdf', { pages = 'trim', fewShot } = {}) {
   if (!PROVIDERS.some((p) => process.env[p.key])) {
     throw new Error(`Missing all AI keys (${PROVIDERS.map((p) => p.key).join(', ')})`);
   }
@@ -571,6 +574,13 @@ export async function extractWithMeta(file, mimeType = 'application/pdf', { page
       PROVIDERS.map((p) => [p.name, process.env[p.key] ? p.model : 'off']),
     ));
 
+    // Few-shot: earlier approved invoices like this one (by GSTIN or by similar OCR text)
+    let examples = '';
+    if (fewShot) {
+      try { examples = await fewShot(ocrParsed, ocr); } catch (e) { console.warn('[extract] fewShot failed:', e.message); }
+      if (examples && DEBUG_OCR) console.log('[extract] few-shot examples added to prompt');
+    }
+
     // 4. Race: the first AI to return a usable result wins — don't wait for the rest.
     //    A failure (error or empty result) just drops out; the others keep going.
     //    If none is usable, fall back to the first one that answered at all (→ regex below).
@@ -582,7 +592,7 @@ export async function extractWithMeta(file, mimeType = 'application/pdf', { page
       const done = () => { if (--pending === 0) resolve(); };
       active.forEach((p) => {
         const t = Date.now();
-        p.run(ocr, ocrParsed).then((raw) => {
+        p.run(ocr, ocrParsed, examples).then((raw) => {
           took[p.name] = secs(Date.now() - t);
           if (data) return;                       // someone already won
           const result = normalise(raw);
@@ -606,13 +616,13 @@ export async function extractWithMeta(file, mimeType = 'application/pdf', { page
     } else {
       data = normalise(ocrParsed);
       source = isUseful(data) ? 'tesseract' : 'failed';
-      if (source === 'failed') return { data, source, duplicate: false, hash, pdfPages };
+      if (source === 'failed') return { data, source, duplicate: false, hash, pdfPages, ocrText: ocr };
       if (DEBUG_OCR) console.log('[extract] using Tesseract fallback');
     }
 
     // Don't cache empty or OCR-only results, so re-uploading can still reach the AI
     if (!USE_CACHE || !isUseful(data) || source === 'tesseract') {
-      return { data, source, duplicate: false, hash, pdfPages };
+      return { data, source, duplicate: false, hash, pdfPages, ocrText: ocr };
     }
 
     // 3. Same bill as an earlier, different file (re-scan / re-photo)
@@ -623,9 +633,9 @@ export async function extractWithMeta(file, mimeType = 'application/pdf', { page
 
     if (earlier) {
       if (DEBUG_OCR) console.log(`[extract] duplicate bill ${key}`);
-      return { data: earlier.data, source, duplicate: true, hash, pdfPages };
+      return { data: earlier.data, source, duplicate: true, hash, pdfPages, ocrText: ocr };
     }
-    return { data, source, duplicate: false, hash, pdfPages };
+    return { data, source, duplicate: false, hash, pdfPages, ocrText: ocr };
   })();
 
   inFlight.set(cacheKey, job);
