@@ -27,11 +27,11 @@ Every outside dependency has one folder, so replacing it touches only that folde
 backend/src/       see backend/README.md -> Files (db/, storage/, integrations/, security/, services/, http/)
 frontend/src/
   main.jsx, App.jsx    entry; login/register until signed in, then AppShell
-  api/                 the ONLY place that calls the server: client (JWT header), errors (→ popup), auth, bills, admin, zoho
+  api/                 the ONLY place that calls the server: client (JWT header), errors (→ popup), cache, auth, bills, admin, zoho
   styles/              all CSS: tokens (colours, spacing), base, layout, controls, tables, feedback, one file per page area
   constants/           roles, tabs per role
   utils/               pure helpers: bill maths, tax, dates, format, session, team…
-  hooks/               useRemote (cancellable loads), useUrlState (filters in the URL), useDebounced, useApiList, useBillDocument
+  hooks/               useBills (cached bill list per scope), useApiList (cached lists), useUrlState (filters in the URL), useDebounced, useBillDocument, useFilePreview
   components/common/   reusable UI: Icon, SearchSelect, Modal, StatusBadge, Pagination, SortHeader, FilterChips…
   components/layout/   Navbar, RoleTabs, banners, AppShell
   pages/auth/          LoginPage, RegisterOrgPage and their steps
@@ -40,5 +40,8 @@ frontend/src/
   pages/history/       HistoryPage: stat tiles, filter bar (team / property / stage / dates / amount), chips, sortable paged table
   pages/admin/         AdminPage: users table, create user, transfer workload
 ```
-Lists are filtered, sorted and paged by the server, so they stay fast as bills grow; filters live in the URL.
+Bill lists are loaded once per scope (history / approvals / my bills) with `?all=1` and kept in memory, together with
+Zoho accounts, taxes, locations, contacts and the team. Every filter, sort, page and total is then worked out in the
+browser (`utils/billQuery.js`), so filtering is instant. **Refresh** loads fresh data; saving, deleting, approving or
+rejecting a bill reloads the lists by itself; signing out clears everything (`api/cache.js`). Filters live in the URL.
 Tables turn into cards on phones.

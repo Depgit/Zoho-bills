@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import * as billsApi from '../../api/bills.js';
 import { showError } from '../../api/errors.js';
 import * as zoho from '../../api/zoho.js';
 import { useApiList } from '../../hooks/useApiList.js';
-import { useRemote } from '../../hooks/useRemote.js';
+import { useBills } from '../../hooks/useBills.js';
+import { paginate } from '../../utils/billQuery.js';
 
 // Everything the bill form needs from the API
 export function useBillFormData(assigns) {
@@ -16,13 +17,13 @@ export function useBillFormData(assigns) {
 
   // The bills I own, newest first, a page at a time
   const [myPage, setMyPage] = useState(1);
-  const myParams = { scope: 'mine', sort: 'updated:desc', page: myPage, pageSize: 10 };
-  const myBills = useRemote((signal) => billsApi.listBills(myParams, signal), JSON.stringify(myParams));
+  const mine = useBills('mine'); // cached; newest first already
+  const myBills = useMemo(() => (mine.loaded ? paginate(mine.rows, myPage, 10) : null), [mine.rows, mine.loaded, myPage]);
 
   // Reload vendor contacts (returns the list; errors → popup)
   const refreshContacts = useCallback(async () => {
     try {
-      const list = await zoho.contacts();
+      const list = await zoho.contacts({ force: true });
       setContacts(list);
       return list;
     } catch (e) {
@@ -59,10 +60,9 @@ export function useBillFormData(assigns) {
     assignablePms,
     contacts,
     vendorAccounts,
-    myBills: myBills.data,
-    myBillsLoading: myBills.loading,
+    myBills,
+    myBillsLoading: mine.loading && !mine.loaded,
     setMyPage,
-    loadMyBills: myBills.reload,
     refreshContacts,
     rememberVendorAccount,
     applyVendorAccount,

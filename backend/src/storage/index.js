@@ -20,3 +20,13 @@ export const putObject = (key, buffer, contentType) => current().put(key, buffer
 export const getObject = (key) => current().get(key);
 export const removeObject = (key) => current().remove(key);
 export const storageDriver = () => STORAGE.driver;
+
+// Start-up: check the storage settings and log a clear message if they're wrong (the app still starts)
+export async function checkStorage() {
+  try {
+    await current().verify();
+    console.log(`File storage: ${STORAGE.driver} ✓`);
+  } catch (e) {
+    console.error(`File storage problem — uploads will fail: ${e.message}`);
+  }
+}

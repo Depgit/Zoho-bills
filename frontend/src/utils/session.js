@@ -1,3 +1,5 @@
+import { clearCache } from '../api/cache.js';
+
 // Logged-in user + token, kept in localStorage
 export const currentUser = () => {
   try {
@@ -20,4 +22,7 @@ export function saveSession({ token, user }) {
   localStorage.setItem('user', JSON.stringify(user));
 }
 
-export const clearSession = () => localStorage.clear();
+export const clearSession = () => {
+  localStorage.clear();
+  clearCache(); // the next user must not see this user's cached data
+};

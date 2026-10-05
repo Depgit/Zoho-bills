@@ -32,7 +32,17 @@ function summarise(rows) {
   return { byStatus, pendingByStage, count, amount: total };
 }
 
+const ALL_LIMIT = 10_000; // ?all=1 safety cap
+
+// ?all=1 → every bill of the scope in one response (the app filters / sorts / pages in the browser)
+async function allBills(user, query) {
+  const { criteria } = await criteriaFor(user, query);
+  const { rows, total } = await billsRepo.findPage(criteria, { sort: { field: 'updated', dir: 'desc' }, page: 1, pageSize: ALL_LIMIT });
+  return { rows: await withTaxInfo(rows, user.financeOrgId), total, truncated: total > rows.length };
+}
+
 export async function listBills(user, query) {
+  if (/^(1|true)$/.test(query.all || '')) return allBills(user, query);
   const { criteria, sort, page, pageSize } = await criteriaFor(user, query);
   // Totals ignore the status / stage filters (they ARE the status breakdown) — except the queue, which is pending only
   const isQueue = !query.scope || query.scope === 'queue';

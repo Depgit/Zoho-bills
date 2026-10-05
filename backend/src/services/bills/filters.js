@@ -3,6 +3,7 @@
 //   pmId=<uuid|unassigned>  managerId=<uuid>  ownerId  vendorId  accountId  minAmt  maxAmt  hasZohoError=1
 //   pendingOnMe=1 → only bills waiting on my approval (Admin: every pending bill)
 //   sort=date:desc (date | amount | billNumber | vendor | status | updated)  page=1  pageSize=25
+//   all=1 → the whole scope in one response, no paging (see listing.js)
 import { usersRepo } from '../../db/index.js';
 import { httpError } from '../../utils/httpError.js';
 

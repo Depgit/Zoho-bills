@@ -29,7 +29,7 @@ export default function AppShell({ user, welcome, onCloseWelcome, onLogout }) {
     <div className="app-container">
       <Navbar user={user} onLogout={onLogout} />
       <WelcomeBanner message={welcome} onClose={onCloseWelcome} />
-      {user.role !== 'ADMIN' && <ReturnedBillsBanner refreshKey={`${active}:${editBill?.id || ''}`} onOpen={() => go('upload')} />}
+      {user.role !== 'ADMIN' && <ReturnedBillsBanner onOpen={() => go('upload')} />}
       <RoleTabs tabs={tabs} active={active} onSelect={go} />
 
       <main className="main-content">

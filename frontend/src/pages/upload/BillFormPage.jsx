@@ -141,7 +141,6 @@ export default function BillFormPage({ role = 'PM', initialEditBill, onClearInit
             : `✓ Bill #${saved.billNumber} submitted to ${nextStep} for approval.`,
       );
       close();
-      data.loadMyBills();
     } catch (e) {
       showError(e);
     } finally {
@@ -155,7 +154,6 @@ export default function BillFormPage({ role = 'PM', initialEditBill, onClearInit
       await billsApi.deleteBill(b.id);
       setMessage(`✓ Bill #${b.billNumber || ''} deleted.`);
       if (editingId === b.id) close();
-      data.loadMyBills();
     } catch (e) {
       showError(e);
     }

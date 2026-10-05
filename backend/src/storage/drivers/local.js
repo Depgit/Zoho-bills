@@ -11,5 +11,6 @@ export function localDriver({ localDir }) {
     },
     get: (key) => fs.readFile(full(key)),
     remove: (key) => fs.rm(full(key), { force: true }),
+    verify: () => fs.mkdir(localDir, { recursive: true }),
   };
 }

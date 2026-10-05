@@ -1,7 +1,10 @@
-// Zoho reference data (cached by the server)
+// Zoho reference data — loaded once per session and reused (Refresh / the vendor refresh button reload it)
 import { api } from './client.js';
+import { cached } from './cache.js';
 
-export const accounts = async () => (await api.get('/zoho/accounts')).data;
-export const taxes = async () => (await api.get('/zoho/taxes')).data;
-export const locations = async () => (await api.get('/zoho/locations')).data;
-export const contacts = async (search = '') => (await api.get('/zoho/contacts', { params: search ? { search } : {} })).data;
+const get = (path) => async () => (await api.get(path)).data;
+
+export const accounts = ({ force } = {}) => cached('zoho:accounts', get('/zoho/accounts'), { force });
+export const taxes = ({ force } = {}) => cached('zoho:taxes', get('/zoho/taxes'), { force });
+export const locations = ({ force } = {}) => cached('zoho:locations', get('/zoho/locations'), { force });
+export const contacts = ({ force } = {}) => cached('zoho:contacts', get('/zoho/contacts'), { force });

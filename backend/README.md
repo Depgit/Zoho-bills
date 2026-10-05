@@ -159,6 +159,7 @@ All routes except register and login need `Authorization: Bearer <jwt>`.
     `accountId` (a line uses this expense account), `minAmt` / `maxAmt`, `hasZohoError=1`,
     `pendingOnMe=1` (only bills waiting on my approval; Admin: every pending bill — `summary.pendingOnMe` has the count for CM / OM / FM / Admin).
   - `sort=field:asc|desc` (date, amount, billNumber, vendor, status, updated), `page`, `pageSize` (10, 25, 50, 100).
+  - `all=1`: every bill of the scope in one response `{ rows, total, truncated }` (up to 10,000, newest first) — what the app uses; it filters in the browser. Responses are gzip-compressed.
 - `GET /:id/pdf`: the bill's file, if I can see the bill.
 - `POST /:id/approve | /:id/reject`: only the approver the bill waits on, or the Admin. Rejecting needs a `comment`. At FM, `lineItems[].tax_id` can override the tax slabs.
 - `GET/POST /vendor-account-map`: remembers the uploader's default expense account for each vendor.
