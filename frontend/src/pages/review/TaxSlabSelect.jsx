@@ -4,8 +4,8 @@ import { isIgst, slabLabel } from '../../utils/tax.js';
 // Zoho tax slab for one line. "Suggested" = the line's tax % and, once the states are known,
 // the right type (GST / IGST); everything else is listed below it.
 export default function TaxSlabSelect({ line, taxes, interState, onChange }) {
-  const pct = line.tax_percentage ?? null;
-  const fits = (t) => pct !== null && Number(t.tax_percentage) === Number(pct) && (interState === null || isIgst(t) === interState);
+  const pct = Number(line.tax_percentage) || 0;
+  const fits = (t) => Number(t.tax_percentage) === pct && (interState === null || isIgst(t) === interState);
   const suggested = taxes.filter(fits);
   const others = taxes.filter((t) => !fits(t));
   const kind = interState === null ? '' : interState ? 'IGST ' : 'GST ';

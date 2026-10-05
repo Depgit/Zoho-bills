@@ -60,18 +60,19 @@ export const stateCode = (value) => {
 const isIgst = (t) => t.tax_specific_type === 'igst' || /igst/i.test(t.tax_name || '');
 
 // Tax plan for a bill: no vendor GSTIN → no GST at all (no slab needed).
-// Otherwise each line with a % gets the matching GST / IGST slab.
+// Otherwise EVERY line gets the matching GST / IGST slab — 0% lines too (GST0 / IGST0):
+// Zoho rejects a GST vendor's line that has neither a tax nor an exemption.
 // interState is null when either state is unknown (the FM must pick by hand).
 export const taxPlan = (bill, taxes) => {
   const hasGst = !!bill.vendorGstin;
   const vendor = gstinState(bill.vendorGstin)?.code || '';
   const property = stateCode(bill.source_of_supply);
   const interState = hasGst && vendor && property ? vendor !== property : null;
-  const needsSlab = (l) => hasGst && Number(l.tax_percentage) > 0;
+  const needsSlab = () => hasGst;
   const slabFor = (l) => {
     if (!needsSlab(l) || interState === null) return '';
     const slab = taxes.find(
-      (t) => Number(t.tax_percentage) === Number(l.tax_percentage) && isIgst(t) === interState,
+      (t) => Number(t.tax_percentage) === (Number(l.tax_percentage) || 0) && isIgst(t) === interState,
     );
     return slab?.tax_id || '';
   };

@@ -40,7 +40,7 @@ export default function UserRow({ user, managers, peers, locations, actions }) {
           >
             <option value="">— Not set —</option>
             {managers.map((m) => (
-              <option key={m._id} value={m._id}>
+              <option key={m.id} value={m.id}>
                 {m.name}
               </option>
             ))}

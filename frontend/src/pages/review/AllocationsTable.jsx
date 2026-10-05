@@ -6,7 +6,7 @@ export default function AllocationsTable({ bill: b }) {
   return (
     <div style={{ marginBottom: '1rem' }}>
       <h4 style={{ fontSize: '0.875rem', fontWeight: 700, margin: '0 0 0.5rem', color: 'var(--text-secondary)' }}>
-        Property Manager(s) · uploaded by {b.createdBy?.name || '—'} ({b.createdBy?.role || '?'})
+        Property Manager(s) · uploaded by {b.creator?.name || '—'} ({b.creator?.role || '?'})
       </h4>
       <div className="table-responsive">
         <table className="custom-table">
@@ -20,8 +20,8 @@ export default function AllocationsTable({ bill: b }) {
           <tbody>
             {b.allocations.map((a, i) => (
               <tr key={i}>
-                <td style={{ fontWeight: 600 }}>{a.pmId?.name || '—'}</td>
-                <td>{a.pmId?.location_name || '—'}</td>
+                <td style={{ fontWeight: 600 }}>{a.pm?.name || '—'}</td>
+                <td>{a.pm?.location_name || '—'}</td>
                 <td style={{ textAlign: 'right' }}>{inr(a.amount)}</td>
               </tr>
             ))}

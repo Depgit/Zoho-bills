@@ -1,5 +1,5 @@
 // Rules for creating / changing users
-import { User } from '../../models/index.js';
+import { usersRepo } from '../../db/index.js';
 import { httpError } from '../../utils/httpError.js';
 import { MANAGER_ROLE, ROLE_NAME } from '../hierarchy.service.js';
 import { findLocation } from '../locations.service.js';
@@ -8,11 +8,11 @@ import { findLocation } from '../locations.service.js';
 export async function checkManager(role, managerId, financeOrgId) {
   const want = MANAGER_ROLE[role];
   if (!want) return null;
-  const manager = managerId && (await User.findOne({ _id: managerId, financeOrgId }));
+  const manager = managerId && (await usersRepo.findInOrg(managerId, financeOrgId));
   if (!manager || manager.role !== want) {
     throw httpError(400, `A ${ROLE_NAME[role]} must report to a ${ROLE_NAME[want]} — pick one`);
   }
-  return manager._id;
+  return manager.id;
 }
 
 // Default location → { location_id, location_name, source_of_supply }. Required for PMs.

@@ -10,8 +10,9 @@ const readPagesPref = () => {
   }
 };
 
-// File drop zone + "PDF pages" choice (first 2 + last 2, or all). Calls onFile(file, pages).
-export default function UploadCard({ extracting, onFile }) {
+// File drop zone + which pages of a SCANNED PDF get OCR'd (first 2 + last 2, or all).
+// PDFs with real text are always read in full. Calls onFile(file, pages).
+export default function UploadCard({ extracting, onFile, replacing }) {
   const [pages, setPages] = useState(readPagesPref);
   const choosePages = (value) => {
     setPages(value);
@@ -36,15 +37,15 @@ export default function UploadCard({ extracting, onFile }) {
           Upload Vendor Invoice (PDF / Image)
         </div>
         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', marginLeft: 'auto', marginRight: '0.75rem' }}>
-          PDF pages
+          Scanned PDFs: OCR
           <SearchSelect
             style={{ width: 'auto', padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
             value={pages}
             onChange={(e) => choosePages(e.target.value)}
             disabled={extracting}
           >
-            <option value="trim">First 2 + last 2</option>
-            <option value="all">All pages</option>
+            <option value="trim">first 2 + last 2 pages</option>
+            <option value="all">all pages</option>
           </SearchSelect>
         </label>
         {extracting && (
@@ -61,8 +62,10 @@ export default function UploadCard({ extracting, onFile }) {
           <Icon name="fileUpload" size={24} />
         </div>
         <div>
-          <p className="upload-text-main">Click or drag bill (PDF, JPG, PNG, WEBP) to upload and auto-extract</p>
-          <p className="upload-text-sub">Supports PDF documents and invoice photos/scans</p>
+          <p className="upload-text-main">
+            {replacing ? 'Click or drag a file to replace this bill’s attachment' : 'Click or drag bill (PDF, JPG, PNG, WEBP) to upload and auto-extract'}
+          </p>
+          <p className="upload-text-sub">{replacing ? 'The details you already filled in are kept' : 'Supports PDF documents and invoice photos/scans'}</p>
         </div>
       </div>
     </div>

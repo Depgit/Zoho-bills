@@ -1,78 +1,81 @@
 import Icon from '../../components/common/Icon.jsx';
+import Pagination from '../../components/common/Pagination.jsx';
 import StatusBadge from '../../components/common/StatusBadge.jsx';
 import { isEditable } from '../../utils/billStatus.js';
+import { inr } from '../../utils/format.js';
 
-// Bills the user owns, with Edit / Delete while they can still be changed
-export default function MyBillsTable({ bills, onEdit, onDelete, onNavigateHistory }) {
+// Bills I own (newest first, paged), with Edit / Delete while they can still be changed
+export default function MyBillsTable({ page, loading, onPage, onEdit, onDelete, onNavigateHistory }) {
+  const rows = page?.rows || [];
   return (
-    <div className="card">
-      <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div className="card-title">
-          <Icon name="file" size={20} style={{ color: 'var(--primary)' }} />
-          My Recent Submissions
-          <span className="count-pill" style={{ marginLeft: '0.5rem' }}>{bills.length}</span>
-        </div>
+    <section className={`panel ${loading ? 'is-loading' : ''}`}>
+      <div className="panel-head">
+        <span className="panel-title">
+          <Icon name="file" size={16} /> My recent bills <span className="count">{page?.total ?? 0}</span>
+        </span>
         {onNavigateHistory && (
-          <button type="button" className="btn btn-secondary btn-sm" onClick={onNavigateHistory}>
-            📜 View Full History &amp; Analytics →
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onNavigateHistory}>
+            Full history →
           </button>
         )}
       </div>
 
-      {bills.length === 0 ? (
-        <div className="pdf-fallback" style={{ borderRadius: 'var(--radius-md)' }}>
-          <Icon name="alertCircle" size={40} strokeWidth={1.5} style={{ marginBottom: '0.5rem', color: 'var(--text-muted)' }} />
-          <p>No bills submitted yet. Upload a vendor invoice above to get started.</p>
-        </div>
+      {rows.length === 0 ? (
+        <div className="empty empty-sm">{loading ? 'Loading…' : 'No bills yet — upload an invoice above to get started.'}</div>
       ) : (
-        <div className="table-responsive">
-          <table className="custom-table">
+        <div className="table-wrap">
+          <table className="table table-cards">
             <thead>
               <tr>
-                <th>Bill Number</th>
+                <th>Bill #</th>
                 <th>Vendor</th>
+                <th className="num">Amount</th>
                 <th>Status</th>
-                <th>Latest Review Note</th>
-                <th></th>
+                <th className="hide-md">Latest note</th>
+                <th aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
-              {bills.map((b) => (
-                <tr key={b._id} style={b.status === 'REJECTED' ? { background: 'rgba(239, 68, 68, 0.04)' } : undefined}>
-                  <td>
-                    <strong style={{ color: 'var(--primary)' }}>{b.billNumber}</strong>
-                  </td>
-                  <td>{b.vendorName}</td>
-                  <td>
-                    <StatusBadge bill={b} />
-                  </td>
-                  <td style={{ color: b.status === 'REJECTED' ? 'var(--danger-text)' : 'var(--text-secondary)', fontSize: '0.8125rem' }}>
-                    {b.history?.at(-1)?.comment || '—'}
-                    {b.status === 'REJECTED' && <div style={{ fontWeight: 600 }}>↩ Sent back to you — edit &amp; resubmit</div>}
-                  </td>
-                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    {isEditable(b) && (
-                      <>
-                        <button className="btn btn-secondary btn-sm" onClick={() => onEdit(b)} style={{ whiteSpace: 'nowrap' }}>
-                          ✏️ Edit
-                        </button>
-                        <button
-                          className="btn btn-outline-danger btn-sm"
-                          onClick={() => onDelete(b)}
-                          style={{ whiteSpace: 'nowrap', marginLeft: '0.4rem' }}
-                          title="Delete bill and make a fresh entry"
-                        >
-                          🗑️ Delete
-                        </button>
-                      </>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {rows.map((b) => {
+                const rejected = b.status === 'REJECTED';
+                return (
+                  <tr key={b.id} className={rejected ? 'row-attention' : undefined}>
+                    <td data-label="Bill #">
+                      <b>{b.billNumber || '—'}</b>
+                    </td>
+                    <td data-label="Vendor" className="truncate">
+                      {b.vendorName || '—'}
+                    </td>
+                    <td data-label="Amount" className="num nowrap">
+                      {inr(b.amount)}
+                    </td>
+                    <td data-label="Status">
+                      <StatusBadge bill={b} />
+                      {rejected && <div className="cell-sub text-danger">↩ Sent back to you — edit &amp; resubmit</div>}
+                    </td>
+                    <td data-label="Note" className="hide-md">
+                      <span className={`note ${rejected ? 'note-danger' : ''}`}>{b.history?.at(-1)?.comment || '—'}</span>
+                    </td>
+                    <td className="actions">
+                      {isEditable(b) && (
+                        <>
+                          <button type="button" className="icon-btn" onClick={() => onEdit(b)} title="Edit">
+                            <Icon name="edit" size={15} />
+                          </button>
+                          <button type="button" className="icon-btn danger" onClick={() => onDelete(b)} title="Delete bill">
+                            <Icon name="trash" size={15} />
+                          </button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
-    </div>
+      {page && page.total > page.pageSize && <Pagination page={page.page} pageSize={page.pageSize} total={page.total} onPage={onPage} />}
+    </section>
   );
 }

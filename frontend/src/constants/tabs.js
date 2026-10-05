@@ -1,27 +1,27 @@
 // Tabs per role: [key, label]. Approvers (CM/OM/FM) also upload; Admin manages users and all bills.
 export const TABS = {
   PM: [
-    ['upload', '📤 Upload Bill'],
-    ['history', '📜 Invoice History'],
+    ['upload', 'Upload bill'],
+    ['history', 'History'],
   ],
   CM: [
-    ['queue', '📋 Approval Queue'],
-    ['upload', '📤 Upload Bill'],
-    ['history', '📜 Invoice History'],
+    ['queue', 'Approvals'],
+    ['upload', 'Upload bill'],
+    ['history', 'History'],
   ],
   OM: [
-    ['queue', '📋 Approval Queue'],
-    ['upload', '📤 Upload Bill'],
-    ['history', '📜 Invoice History'],
+    ['queue', 'Approvals'],
+    ['upload', 'Upload bill'],
+    ['history', 'History'],
   ],
   FM: [
-    ['queue', '📋 Approval Queue'],
-    ['upload', '📤 Upload Bill (direct to Zoho)'],
-    ['history', '📜 Invoice History'],
+    ['queue', 'Approvals'],
+    ['upload', 'Upload bill (direct to Zoho)'],
+    ['history', 'History'],
   ],
   ADMIN: [
-    ['users', '👥 Users & Hierarchy'],
-    ['queue', '⏳ All Pending'],
-    ['history', '📜 All Bills'],
+    ['users', 'Users & hierarchy'],
+    ['queue', 'All pending'],
+    ['history', 'All bills'],
   ],
 };

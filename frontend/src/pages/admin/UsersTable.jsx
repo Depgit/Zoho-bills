@@ -42,10 +42,10 @@ export default function UsersTable({ users, byRole, managersFor, locations, acti
           <tbody>
             {shown.map((u) => (
               <UserRow
-                key={u._id}
+                key={u.id}
                 user={u}
                 managers={managersFor(u.role)}
-                peers={(byRole[u.role] || []).filter((x) => x._id !== u._id)}
+                peers={(byRole[u.role] || []).filter((x) => x.id !== u.id)}
                 locations={locations}
                 actions={actions}
               />

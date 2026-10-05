@@ -1,6 +1,6 @@
 import { BLANK_LINE } from './billForm.js';
 import DiscountRow from './DiscountRow.jsx';
-import LineItemRow, { LINE_COLUMNS } from './LineItemRow.jsx';
+import LineItemRow from './LineItemRow.jsx';
 
 // Bill lines + discount. The first expense account picked on a bill is copied to the other
 // lines that were empty or had the same auto-filled account; later picks change only that line.
@@ -34,7 +34,7 @@ export default function LineItemsEditor({ form, setForm, set, accounts, taxRates
       </div>
 
       <div className="line-items-container">
-        <div className="line-item-header" style={{ gridTemplateColumns: LINE_COLUMNS }}>
+        <div className="line-item-header">
           <div>Description</div>
           <div>Item Name</div>
           <div>Qty</div>

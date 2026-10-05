@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api } from '../../api/client.js';
+import { login as signIn } from '../../api/auth.js';
 import { showError } from '../../api/errors.js';
 import { saveSession } from '../../utils/session.js';
 import Icon from '../../components/common/Icon.jsx';
@@ -18,7 +18,7 @@ export default function LoginPage({ onLogin, onRegister }) {
     if (!email || !password) return showError('Please enter both email and password');
     setLoading(true);
     try {
-      const { data } = await api.post('/auth/login', { email, password });
+      const data = await signIn(email, password);
       saveSession(data);
       onLogin(data.user);
     } catch (err) {

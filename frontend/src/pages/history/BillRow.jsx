@@ -1,130 +1,72 @@
 import Icon from '../../components/common/Icon.jsx';
 import StatusBadge from '../../components/common/StatusBadge.jsx';
-import { inr } from '../../utils/format.js';
 import { returnedTo } from '../../utils/billStatus.js';
-import { propertyOf } from '../../utils/properties.js';
+import { inr } from '../../utils/format.js';
 import ApprovalTrail from './ApprovalTrail.jsx';
 
-const small = { fontSize: '0.75rem', color: 'var(--text-muted)' };
-const iconButton = { padding: '0.35rem 0.6rem' };
+// "Saket" or "Split · 3 properties", with the PM name(s)
+function property(b) {
+  const pms = (b.allocations || []).map((a) => a.pm).filter(Boolean);
+  if (!pms.length) return { name: 'Unassigned', sub: '' };
+  if (pms.length === 1) return { name: pms[0].location_name || pms[0].name, sub: pms[0].name };
+  return { name: `Split · ${pms.length} properties`, sub: pms.map((p) => p.name).join(', ') };
+}
 
-// One bill in the history table
-export default function BillRow({ bill: b, amount, showManagerColumns, canEdit, canDelete, onPreview, onEdit, onDelete, onNew }) {
+// One bill in the history table (a card on phones)
+export default function BillRow({ bill: b, showManagerColumns, canEdit, canDelete, onPreview, onEdit, onDelete }) {
   const rejected = b.status === 'REJECTED';
-  // Only the owner has to act on a rejection; for everyone else it's just a record
-  const mine = rejected && canEdit;
+  const mine = rejected && canEdit; // only the owner has to act on a rejection
   const note = b.history?.at(-1)?.comment;
-  const prop = propertyOf(b);
+  const prop = property(b);
 
   return (
-    <tr style={mine ? { background: 'rgba(239, 68, 68, 0.03)' } : {}}>
-      <td>
-        <button
-          type="button"
-          className="link-btn"
-          onClick={() => onPreview(b)}
-          title="Click to view invoice details & document"
-          style={{
-            fontWeight: 700,
-            color: 'var(--primary)',
-            background: 'none',
-            border: 'none',
-            padding: 0,
-            cursor: 'pointer',
-            textAlign: 'left',
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '0.25rem',
-          }}
-        >
-          {b.billNumber}
-          <Icon name="external" size={12} />
+    <tr className={mine ? 'row-attention' : undefined}>
+      <td data-label="Bill #">
+        <button type="button" className="link" onClick={() => onPreview(b)}>
+          {b.billNumber || '—'}
         </button>
       </td>
-
       {showManagerColumns && (
-        <td>
-          <div style={{ fontWeight: 600 }}>{prop.name}</div>
-          <span style={small}>
-            {prop.pm}
-            {prop.state ? ` · ${prop.state}` : ''}
-          </span>
+        <td data-label="Property">
+          <div className="cell-main">{prop.name}</div>
+          {prop.sub && <div className="cell-sub">{prop.sub}</div>}
         </td>
       )}
-
-      <td>
-        <div style={{ fontWeight: 600 }}>{b.vendorName || 'Unnamed Vendor'}</div>
-        {b.source_of_supply && <span style={small}>Supply: {b.source_of_supply}</span>}
+      <td data-label="Vendor">
+        <div className="cell-main truncate">{b.vendorName || 'Unnamed vendor'}</div>
       </td>
-
-      <td>
-        <div>{b.date || '—'}</div>
-        {b.dueDate && <div style={small}>Due: {b.dueDate}</div>}
+      <td data-label="Date" className="nowrap">
+        {b.date || '—'}
       </td>
-
-      <td>
-        <strong style={{ color: 'var(--text-main)', fontSize: '0.9375rem' }}>{inr(amount)}</strong>
-        {b.lineItems?.length > 0 && (
-          <div style={small}>
-            {b.lineItems.length} {b.lineItems.length === 1 ? 'item' : 'items'}
-          </div>
-        )}
+      <td data-label="Amount" className="num nowrap">
+        <b>{inr(b.amount)}</b>
       </td>
-
-      <td>
+      <td data-label="Status">
         <StatusBadge bill={b} />
+        {rejected && <div className="cell-sub">{mine ? '↩ Back to you' : `↩ With ${returnedTo(b)}`}</div>}
       </td>
-
       {showManagerColumns && (
-        <td style={{ fontSize: '0.8125rem', whiteSpace: 'nowrap' }}>
+        <td data-label="Approvals" className="hide-md cell-sub">
           <ApprovalTrail bill={b} />
         </td>
       )}
-
-      <td style={{ maxWidth: '280px' }}>
-        {note ? (
-          <div
-            style={{
-              fontSize: '0.8125rem',
-              color: mine ? 'var(--danger-text)' : 'var(--text-secondary)',
-              fontWeight: mine ? 600 : 400,
-            }}
-          >
-            {mine ? '⚠️ ' : ''}“{note}”
-          </div>
-        ) : (
-          <span style={{ color: 'var(--text-muted)', fontSize: '0.8125rem' }}>—</span>
-        )}
-        {rejected && <div style={small}>{mine ? '↩ Sent back to you — edit & resubmit' : `↩ With ${returnedTo(b)} for changes`}</div>}
+      <td data-label="Note" className="hide-md">
+        {note ? <div className={`note ${mine ? 'note-danger' : ''}`}>“{note}”</div> : <span className="muted">—</span>}
       </td>
-
-      <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-        <div style={{ display: 'inline-flex', gap: '0.4rem', alignItems: 'center' }}>
-          <button type="button" className="btn btn-secondary btn-sm" onClick={() => onPreview(b)} title="View Document & Breakdown" style={iconButton}>
-            <Icon name="eye" size={14} />
+      <td className="actions">
+        <button type="button" className="icon-btn" onClick={() => onPreview(b)} title="View bill & document">
+          <Icon name="eye" size={15} />
+        </button>
+        {canEdit && (
+          <button type="button" className="icon-btn" onClick={() => onEdit(b)} title="Edit & resubmit">
+            <Icon name="edit" size={15} />
           </button>
-          {canEdit && (
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => onEdit(b)} title="Edit & Resubmit Bill" style={iconButton}>
-              ✏️ Edit
-            </button>
-          )}
-          {canDelete && (
-            <button type="button" className="btn btn-outline-danger btn-sm" onClick={() => onDelete(b)} title="Delete this bill" style={iconButton}>
-              <Icon name="trash" size={14} />
-            </button>
-          )}
-          {canEdit && rejected && (
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              onClick={onNew}
-              title="Make a new invoice entry"
-              style={{ ...iconButton, fontSize: '0.75rem' }}
-            >
-              + New
-            </button>
-          )}
-        </div>
+        )}
+        {canDelete && (
+          <button type="button" className="icon-btn danger" onClick={() => onDelete(b)} title="Delete bill">
+            <Icon name="trash" size={15} />
+          </button>
+        )}
       </td>
     </tr>
   );

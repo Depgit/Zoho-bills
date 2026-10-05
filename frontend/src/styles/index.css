@@ -1,0 +1,11 @@
+/* App styles — one file per area */
+@import './tokens.css';
+@import './base.css';
+@import './layout.css';
+@import './controls.css';
+@import './tables.css';
+@import './feedback.css';
+@import './history.css';
+@import './review.css';
+@import './upload.css';
+@import './auth.css';

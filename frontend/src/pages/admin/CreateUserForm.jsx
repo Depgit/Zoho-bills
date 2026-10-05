@@ -58,7 +58,7 @@ export default function CreateUserForm({ locations, managersFor, onCreate }) {
             <SearchSelect value={form.managerId} onChange={(e) => set('managerId', e.target.value)} required>
               <option value="">— Select {ROLE_NAME[managerRole]} —</option>
               {managers.map((m) => (
-                <option key={m._id} value={m._id}>
+                <option key={m.id} value={m.id}>
                   {m.name}
                 </option>
               ))}

@@ -3,9 +3,8 @@ import HistoryTimeline from '../../components/common/HistoryTimeline.jsx';
 import Modal from '../../components/common/Modal.jsx';
 import StatusBadge from '../../components/common/StatusBadge.jsx';
 import { useBillDocument } from '../../hooks/useBillDocument.js';
-import { getBillTotal } from '../../utils/billMath.js';
-import { returnedTo } from '../../utils/billStatus.js';
-import { inr } from '../../utils/format.js';
+import { lastEdit, returnedTo, uploadedBy } from '../../utils/billStatus.js';
+import { formatDate, inr } from '../../utils/format.js';
 import PreviewAllocations from './PreviewAllocations.jsx';
 import PreviewLineItems from './PreviewLineItems.jsx';
 
@@ -53,8 +52,15 @@ export default function BillPreviewModal({ bill: b, canEdit, onClose, onDelete, 
       <div className="history-modal-body">
         <div className="detail-chips-row" style={{ marginBottom: '1rem' }}>
           <Chip label="Bill Total:" valueStyle={{ color: 'var(--primary)', fontWeight: 700 }}>
-            {inr(getBillTotal(b))}
+            {inr(b.total)}
           </Chip>
+          <Chip label="Uploaded by:">{uploadedBy(b)}</Chip>
+          {lastEdit(b) && (
+            <Chip label="Last edited by:">
+              {lastEdit(b).who}
+              {lastEdit(b).at ? ` · ${formatDate(lastEdit(b).at)}` : ''}
+            </Chip>
+          )}
           {b.dueDate && <Chip label="Due Date:">{b.dueDate}</Chip>}
           {b.source_of_supply && <Chip label="Source of Supply:">{b.source_of_supply}</Chip>}
           {b.location_id && <Chip label="Location:">{b.location_name || b.location_id}</Chip>}

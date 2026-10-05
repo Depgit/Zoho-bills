@@ -7,7 +7,7 @@ import { assignablePms } from '../hierarchy.service.js';
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
 
 export async function resolveAllocations(owner, wanted, total, submitting) {
-  if (owner.role === 'PM') return [{ pmId: owner._id, amount: total }];
+  if (owner.role === 'PM') return [{ pmId: owner.id, amount: total }];
 
   const list = (Array.isArray(wanted) ? wanted : []).filter((a) => a && a.pmId);
   if (submitting && !list.length) throw httpError(400, 'Choose which Property Manager(s) this bill belongs to');
@@ -15,7 +15,7 @@ export async function resolveAllocations(owner, wanted, total, submitting) {
   const ids = list.map((a) => String(a.pmId));
   if (new Set(ids).size !== ids.length) throw httpError(400, 'Each Property Manager can appear only once');
 
-  const allowed = new Set((await assignablePms(owner)).map((u) => String(u._id)));
+  const allowed = new Set((await assignablePms(owner)).map((u) => u.id));
   if (ids.some((id) => !allowed.has(id))) {
     throw httpError(400, 'You can only assign bills to Property Managers in your reporting line');
   }

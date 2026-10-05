@@ -7,11 +7,12 @@
 //            └─ PM  Property Manager
 //
 // Every user except FM/ADMIN has a `managerId` pointing at a user of the role above.
-import { User } from '../models/index.js';
+import { usersRepo } from '../db/index.js';
 
 export const STAFF_ROLES = ['PM', 'CM', 'OM', 'FM']; // roles the Admin can assign
 export const MANAGER_ROLE = { PM: 'CM', CM: 'OM', OM: 'FM', FM: null };
 export const UPLOAD_ROLES = ['PM', 'CM', 'OM', 'FM'];
+export const APPROVER_ROLES = ['CM', 'OM', 'FM'];
 export const TRANSFER_ROLES = ['CM', 'OM', 'FM'];
 export const ROLE_NAME = {
   PM: 'Property Manager',
@@ -21,44 +22,14 @@ export const ROLE_NAME = {
   ADMIN: 'Admin',
 };
 
-export const orgUsers = (financeOrgId) =>
-  User.find({ financeOrgId }, 'name role managerId location_id location_name source_of_supply').lean();
-
-// All users below `rootId` (direct and indirect reports), from a preloaded user list
-export function below(users, rootId) {
-  const children = new Map();
-  for (const u of users) {
-    const manager = String(u.managerId || '');
-    if (!children.has(manager)) children.set(manager, []);
-    children.get(manager).push(u);
-  }
-  const out = [];
-  const stack = [String(rootId)];
-  while (stack.length) {
-    for (const u of children.get(stack.pop()) || []) {
-      out.push(u);
-      stack.push(String(u._id));
-    }
-  }
-  return out;
-}
-
 // PMs a user may assign bill amounts to: PM → only themselves; CM/OM/FM → every PM below them
-export async function assignablePms(user) {
-  if (user.role === 'PM') return [user];
-  const users = await orgUsers(user.financeOrgId);
-  return below(users, user._id || user.id).filter((u) => u.role === 'PM');
-}
+export const assignablePms = (user) => (user.role === 'PM' ? [user] : usersRepo.below(user.id, 'PM'));
 
 // Ids of every PM below a user
-export async function pmIdsBelow(user) {
-  const users = await orgUsers(user.financeOrgId);
-  return below(users, user.id).filter((u) => u.role === 'PM').map((u) => u._id);
-}
+export const pmIdsBelow = async (userId) => (await usersRepo.below(userId, 'PM')).map((u) => u.id);
 
 // Everyone below a user (Admin: the whole org), for the history team filters
 export async function teamBelow(user) {
-  const users = await orgUsers(user.financeOrgId);
-  const team = user.role === 'ADMIN' ? users.filter((u) => u.role !== 'ADMIN') : below(users, user.id);
-  return team.map(({ _id, name, role, managerId, location_name }) => ({ _id, name, role, managerId, location_name }));
+  const team = user.role === 'ADMIN' ? await usersRepo.staffOfOrg(user.financeOrgId) : await usersRepo.below(user.id);
+  return team.map(({ id, name, role, managerId, location_name }) => ({ id, name, role, managerId, location_name }));
 }

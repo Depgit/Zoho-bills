@@ -1,12 +1,10 @@
 import Icon from '../../components/common/Icon.jsx';
 import SearchSelect from '../../components/common/SearchSelect.jsx';
 
-export const LINE_COLUMNS = '1.4fr 1.2fr 0.6fr 0.8fr 1.3fr 1fr 36px';
-
 // One bill line: description, name, qty, rate, expense account, tax %
 export default function LineItemRow({ line, accounts, taxRates, onChange, onRemove }) {
   return (
-    <div className="line-item-row" style={{ gridTemplateColumns: LINE_COLUMNS }}>
+    <div className="line-item-row">
       <input
         className="form-control"
         placeholder="Detailed description"

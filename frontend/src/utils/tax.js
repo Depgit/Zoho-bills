@@ -1,12 +1,12 @@
 // Zoho tax slabs: same state → GST (CGST + SGST), different state → IGST
 export const isIgst = (t) => t.tax_specific_type === 'igst' || /igst/i.test(t.tax_name || '');
 
-// Slab for a tax % and GST/IGST
+// Slab for a tax % (0% → GST0 / IGST0) and GST/IGST
 export const pickSlab = (taxes, pct, interState) =>
-  taxes.find((t) => Number(t.tax_percentage) === Number(pct) && isIgst(t) === interState)?.tax_id || '';
+  taxes.find((t) => Number(t.tax_percentage) === (Number(pct) || 0) && isIgst(t) === interState)?.tax_id || '';
 
-// A line needs a slab only if the bill has a vendor GSTIN and the line has a tax %
-export const needsSlab = (bill, l) => !!bill?.taxInfo?.hasGst && Number(l.tax_percentage) > 0;
+// With a vendor GSTIN every line needs a slab, 0% lines too (Zoho wants a tax or an exemption on each line)
+export const needsSlab = (bill) => !!bill?.taxInfo?.hasGst;
 
 // Auto-pick every line's slab from vendor state vs bill state (taxInfo from the API)
 export const autoSlabs = (bill, taxes) => ({

@@ -1,46 +1,46 @@
-import Icon from '../../components/common/Icon.jsx';
+import Pagination from '../../components/common/Pagination.jsx';
+import SortHeader from '../../components/common/SortHeader.jsx';
 import BillRow from './BillRow.jsx';
 import EmptyHistory from './EmptyHistory.jsx';
 
-// The filtered bills, or an empty state
-export default function BillsTable({ bills, totalCount, showManagerColumns, permissions, amountOf, filtersActive, canUpload, handlers }) {
+// One page of bills with sortable headers and paging
+export default function BillsTable({ page, loading, sort, onSort, onPage, onPageSize, showManagerColumns, permissions, filtersActive, canUpload, handlers }) {
+  const rows = page?.rows || [];
   return (
-    <div className="card">
-      <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div className="card-title">
-          <Icon name="file" size={18} style={{ color: 'var(--primary)' }} />
-          Submitted Invoices Record
-          <span className="count-pill" style={{ marginLeft: '0.5rem' }}>{bills.length}</span>
-        </div>
-        <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
-          Showing {bills.length} of {totalCount} invoices
-        </div>
-      </div>
-
-      {bills.length === 0 ? (
+    <section className={`panel ${loading ? 'is-loading' : ''}`}>
+      {rows.length === 0 && !loading ? (
         <EmptyHistory filtered={filtersActive} canUpload={canUpload} onReset={handlers.onReset} onNewEntry={handlers.onNew} />
       ) : (
-        <div className="table-responsive">
-          <table className="custom-table">
+        <div className="table-wrap">
+          <table className="table table-cards">
             <thead>
               <tr>
-                <th>Bill / Invoice #</th>
+                <SortHeader field="billNumber" sort={sort} onSort={onSort}>
+                  Bill #
+                </SortHeader>
                 {showManagerColumns && <th>Property</th>}
-                <th>Vendor</th>
-                <th>Bill Date</th>
-                <th>Calculated Total</th>
-                <th>Status</th>
-                {showManagerColumns && <th>Approval Trail</th>}
-                <th>Review Note / Feedback</th>
-                <th style={{ textAlign: 'right' }}>Actions</th>
+                <SortHeader field="vendor" sort={sort} onSort={onSort}>
+                  Vendor
+                </SortHeader>
+                <SortHeader field="date" sort={sort} onSort={onSort}>
+                  Date
+                </SortHeader>
+                <SortHeader field="amount" sort={sort} onSort={onSort} align="right">
+                  Amount
+                </SortHeader>
+                <SortHeader field="status" sort={sort} onSort={onSort}>
+                  Status
+                </SortHeader>
+                {showManagerColumns && <th className="hide-md">Approvals</th>}
+                <th className="hide-md">Note</th>
+                <th aria-label="Actions" />
               </tr>
             </thead>
             <tbody>
-              {bills.map((b) => (
+              {rows.map((b) => (
                 <BillRow
-                  key={b._id}
+                  key={b.id}
                   bill={b}
-                  amount={amountOf(b)}
                   showManagerColumns={showManagerColumns}
                   canEdit={permissions.canEdit(b)}
                   canDelete={permissions.canDelete(b)}
@@ -51,6 +51,7 @@ export default function BillsTable({ bills, totalCount, showManagerColumns, perm
           </table>
         </div>
       )}
-    </div>
+      {page && page.total > 0 && <Pagination page={page.page} pageSize={page.pageSize} total={page.total} onPage={onPage} onPageSize={onPageSize} />}
+    </section>
   );
 }

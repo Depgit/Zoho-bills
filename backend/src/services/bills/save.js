@@ -25,7 +25,8 @@ export async function saveBill(b, body, owner) {
   Object.assign(b, pickFormFields(body));
   Object.assign(b, await resolveBillLocation(owner, body.location_id || b.location_id));
   const submitting = !body.draft;
-  b.allocations = await resolveAllocations(owner, body.allocations, billTotal(b), submitting);
+  b.total = billTotal(b);
+  b.allocations = await resolveAllocations(owner, body.allocations, b.total, submitting);
   b.zohoError = null;
 
   if (!submitting) {

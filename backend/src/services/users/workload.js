@@ -1,16 +1,9 @@
 // Everything still assigned to a user — must be empty before deleting them or changing their role
-import { Bill, User } from '../../models/index.js';
-
-const OPEN = { $ne: 'POSTED' }; // a bill that still needs work
+import { billsRepo, usersRepo } from '../../db/index.js';
 
 export async function workload(user) {
-  const [reports, approvals, owned, allocated] = await Promise.all([
-    User.countDocuments({ managerId: user._id }),
-    Bill.countDocuments({ approverId: user._id, status: 'PENDING' }),
-    Bill.countDocuments({ ownerId: user._id, status: OPEN }),
-    Bill.countDocuments({ 'allocations.pmId': user._id, status: OPEN }),
-  ]);
-  return { reports, approvals, owned, allocated };
+  const [reports, bills] = await Promise.all([usersRepo.countReports(user.id), billsRepo.workloadOf(user.id)]);
+  return { reports, ...bills };
 }
 
 export const hasWork = (w) => Boolean(w.reports || w.approvals || w.owned || w.allocated);

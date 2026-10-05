@@ -3,29 +3,45 @@
     "type": "module",
     "scripts": {
         "start": "node src/server.js",
+        "dev": "node --watch src/server.js",
         "restart": "lsof -ti:8080 | xargs kill -9 2>/dev/null; node src/server.js",
-        "seed": "node seed.js",
-        "format": "prettier --write \"src/**/*.js\""
+        "db:up": "docker compose up -d",
+        "db:generate": "drizzle-kit generate",
+        "db:migrate": "node scripts/db-migrate.js",
+        "db:copy-from-mongo": "node scripts/migrate-mongo-to-pg.js",
+        "test:e2e": "node tests/flow.e2e.js",
+        "test:learning": "node tests/learning.e2e.js",
+        "test": "node tests/flow.e2e.js && node tests/learning.e2e.js && node tests/read.e2e.js",
+        "format": "prettier --write \"src/**/*.js\"",
+        "test:read": "node tests/read.e2e.js",
+        "secrets:encrypt": "node scripts/encrypt-secrets.js",
+        "db:copy": "node scripts/copy-db.js"
     },
     "dependencies": {
         "@anthropic-ai/sdk": "^0.40.1",
         "@google/genai": "^2.26.0",
+        "@supabase/supabase-js": "^2.117.2",
         "axios": "^1.7.0",
         "bcryptjs": "^2.4.3",
         "cors": "^2.8.5",
         "dotenv": "^16.4.0",
+        "drizzle-orm": "^0.45.3",
         "express": "^4.19.0",
         "form-data": "^4.0.0",
         "https": "^1.0.0",
         "jsonwebtoken": "^9.0.2",
-        "mongoose": "^8.5.0",
         "multer": "^1.4.5-lts.1",
         "pdf-lib": "^1.17.1",
-        "pdf-parse": "^1.1.4",
         "pdf-to-img": "^7.0.0",
         "pdf-to-png-converter": "^4.2.1",
+        "pdfjs-dist": "6.2.108",
+        "pg": "^8.23.1",
         "sharp": "^0.35.5",
         "tesseract.js": "^7.0.0"
     },
-    "main": "src/server.js"
+    "main": "src/server.js",
+    "devDependencies": {
+        "drizzle-kit": "^0.31.11",
+        "mongodb": "^7.7.0"
+    }
 }

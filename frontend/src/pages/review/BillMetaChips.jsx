@@ -1,3 +1,5 @@
+import { lastEdit, uploadedBy } from '../../utils/billStatus.js';
+import { formatDate } from '../../utils/format.js';
 // Small "label: value" chips: dates, OCR total, location, state
 function Chip({ label, children, valueStyle }) {
   return (
@@ -11,8 +13,16 @@ function Chip({ label, children, valueStyle }) {
 }
 
 export default function BillMetaChips({ bill: b }) {
+  const edited = lastEdit(b);
   return (
     <div className="detail-chips-row">
+      <Chip label="Uploaded by:">{uploadedBy(b)}</Chip>
+      {edited && (
+        <Chip label="Last edited by:">
+          {edited.who}
+          {edited.at ? ` · ${formatDate(edited.at)}` : ''}
+        </Chip>
+      )}
       <Chip label="Bill Date:">{b.date || '—'}</Chip>
       <Chip label="Due Date:">{b.dueDate || '—'}</Chip>
       <Chip label="Extracted Total:" valueStyle={{ color: 'var(--primary)' }}>

@@ -1,7 +1,32 @@
+# Dependencies
+node_modules/
+
+# Secrets — keep .env.example, ignore every real env file
+.env
 *.env
-backend/node_modules
-frontend/node_modules
-.DS_Store
+.env.*
+!.env.example
+
+# Build output
+frontend/dist/
+
+# Runtime data (created by the app)
+backend/data/files/
+backend/data/extract-store.json
+backend/eng.traineddata
+backend/uploads/
+
+# Local-only scripts and backups
 backend/seed.js
-backend/uploads/**
+*_backup
+mongo_backup/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor / tools
+.DS_Store
+.vscode/
+.idea/
 .kilo

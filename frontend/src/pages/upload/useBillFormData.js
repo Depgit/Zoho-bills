@@ -1,53 +1,49 @@
-import { useEffect, useState } from 'react';
-import { api } from '../../api/client.js';
+import { useCallback, useEffect, useState } from 'react';
+import * as billsApi from '../../api/bills.js';
 import { showError } from '../../api/errors.js';
+import * as zoho from '../../api/zoho.js';
 import { useApiList } from '../../hooks/useApiList.js';
+import { useRemote } from '../../hooks/useRemote.js';
 
 // Everything the bill form needs from the API
 export function useBillFormData(assigns) {
-  const [accounts] = useApiList('/zoho/accounts');
-  const [taxes] = useApiList('/zoho/taxes');
-  const [locations] = useApiList('/zoho/locations');
-  const [assignablePms] = useApiList('/bills/assignable-pms', { enabled: assigns });
+  const [accounts] = useApiList(zoho.accounts);
+  const [taxes] = useApiList(zoho.taxes);
+  const [locations] = useApiList(zoho.locations);
+  const [assignablePms] = useApiList(billsApi.assignablePms, { enabled: assigns });
   const [contacts, setContacts] = useState([]);
   const [vendorAccounts, setVendorAccounts] = useState({}); // vendor → remembered expense account
-  const [myBills, setMyBills] = useState([]);
 
-  const loadMyBills = () =>
-    api
-      .get('/bills', { params: { scope: 'mine' } })
-      .then((r) => setMyBills(r.data))
-      .catch(showError);
+  // The bills I own, newest first, a page at a time
+  const [myPage, setMyPage] = useState(1);
+  const myParams = { scope: 'mine', sort: 'updated:desc', page: myPage, pageSize: 10 };
+  const myBills = useRemote((signal) => billsApi.listBills(myParams, signal), JSON.stringify(myParams));
 
   // Reload vendor contacts (returns the list; errors → popup)
-  const refreshContacts = async () => {
+  const refreshContacts = useCallback(async () => {
     try {
-      const r = await api.get('/zoho/contacts');
-      setContacts(r.data);
-      return r.data;
+      const list = await zoho.contacts();
+      setContacts(list);
+      return list;
     } catch (e) {
       showError(e);
       return [];
     }
-  };
+  }, []);
 
   useEffect(() => {
-    api
-      .get('/zoho/contacts')
-      .then((r) => setContacts(r.data))
+    zoho.contacts().then(setContacts).catch(() => {});
+    billsApi
+      .vendorAccounts()
+      .then((map) => setVendorAccounts(map || {}))
       .catch(() => {});
-    api
-      .get('/bills/vendor-account-map')
-      .then((r) => setVendorAccounts(r.data || {}))
-      .catch(() => {});
-    loadMyBills();
   }, []);
 
   // Remember the expense account picked for a vendor
   const rememberVendorAccount = (vendorId, accountId) => {
     if (!vendorId || !accountId) return;
     setVendorAccounts((prev) => ({ ...prev, [vendorId]: accountId }));
-    api.post('/bills/vendor-account-map', { vendorId, account_id: accountId }).catch(() => {});
+    billsApi.rememberVendorAccount(vendorId, accountId).catch(() => {});
   };
 
   // Give lines without an account the vendor's remembered one
@@ -63,8 +59,10 @@ export function useBillFormData(assigns) {
     assignablePms,
     contacts,
     vendorAccounts,
-    myBills,
-    loadMyBills,
+    myBills: myBills.data,
+    myBillsLoading: myBills.loading,
+    setMyPage,
+    loadMyBills: myBills.reload,
     refreshContacts,
     rememberVendorAccount,
     applyVendorAccount,

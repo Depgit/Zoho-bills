@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api } from '../../api/client.js';
+import { registerOrg } from '../../api/auth.js';
 import { showError } from '../../api/errors.js';
 import { saveSession } from '../../utils/session.js';
 import Icon from '../../components/common/Icon.jsx';
@@ -31,7 +31,7 @@ export default function RegisterOrgPage({ onBack, onSuccess }) {
     e.preventDefault();
     setLoading(true);
     try {
-      const { data } = await api.post('/auth/register', form);
+      const data = await registerOrg(form);
       saveSession(data);
       onSuccess(data.user, data.zohoOrgName);
     } catch (err) {

@@ -14,7 +14,7 @@ export default function BillInspector({ bill, taxes, onSlabChange, onDecide }) {
   const atFM = bill.stage === 'FM'; // approving posts to Zoho, so tax slabs matter
 
   return (
-    <div className="review-detail-card" key={bill._id}>
+    <div className="review-detail-card" key={bill.id}>
       <div className="detail-header-banner">
         <div className="detail-title-group">
           <h3>{bill.billNumber}</h3>
@@ -36,7 +36,7 @@ export default function BillInspector({ bill, taxes, onSlabChange, onDecide }) {
         <DocumentPreview url={doc.url} type={doc.type || bill.fileType} />
       </div>
 
-      <ReviewActions key={bill._id} stage={bill.stage} onDecide={onDecide} />
+      <ReviewActions key={bill.id} stage={bill.stage} onDecide={onDecide} />
     </div>
   );
 }

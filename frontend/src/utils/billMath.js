@@ -29,3 +29,17 @@ export function getBillTotal(b) {
 
 // A PM's share of a bill (their allocation), or 0
 export const shareOf = (b, pmId) => Number(b?.allocations?.find((a) => idOf(a.pmId) === String(pmId))?.amount) || 0;
+
+// `total` split equally over `n` people, in paise; the last share takes the rounding remainder
+export function splitEqually(total, n) {
+  if (!n) return [];
+  const paise = Math.round((Number(total) || 0) * 100);
+  const share = Math.floor(paise / n);
+  return Array.from({ length: n }, (_, i) => (i === n - 1 ? paise - share * (n - 1) : share) / 100);
+}
+
+// Are these amounts what an equal split of `total` would give?
+export const isEqualSplit = (amounts, total) => {
+  const equal = splitEqually(total, amounts.length);
+  return amounts.every((a, i) => Math.abs((Number(a) || 0) - equal[i]) < 0.01);
+};

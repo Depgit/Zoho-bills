@@ -1,4 +1,5 @@
 // Building the bill form state from an extraction or from an existing bill
+import { isEqualSplit } from '../../utils/billMath.js';
 import { idOf } from '../../utils/ids.js';
 
 export const BLANK_LINE = { name: '', description: '', quantity: 1, rate: '', account_id: '', tax_percentage: 0, tax_id: '' };
@@ -35,6 +36,7 @@ export const formFromExtraction = (data, file, extracted, vendorId, lineItems, d
   lineItems,
   accountPicked: false,
   allocations: [],
+  allocationMode: 'equal', // 'equal' = total shared equally between the chosen PMs; 'manual' = amounts typed by hand
   location_id: defaultLocationId || '', // preselected from the profile; can be changed
 });
 
@@ -59,10 +61,14 @@ export const formFromBill = (b, taxes, defaultLocationId) => ({
   // existing bill with accounts already chosen → don't overwrite other lines
   accountPicked: (b.lineItems || []).some((l) => l.account_id),
   allocations: (b.allocations || []).map((a) => ({ pmId: idOf(a.pmId), amount: a.amount })),
+  // Reopened bill: keep sharing equally only if it was an equal split
+  allocationMode: isEqualSplit((b.allocations || []).map((a) => a.amount), b.total ?? (b.allocations || []).reduce((s, a) => s + Number(a.amount || 0), 0))
+    ? 'equal'
+    : 'manual',
   location_id: b.location_id || defaultLocationId || '',
 });
 
-// "✓ Vendor auto-matched by GSTIN: X — PDF: first 2 + last 2 (4/9 read) · via gemini"
+// "✓ Vendor auto-matched by GSTIN: X — PDF text read from all 9 page(s) · via gemini"
 export function extractionMessage(data, extracted, matched) {
   if (data.warning) return `Note: ${data.warning}`;
   const match = matched
@@ -72,7 +78,9 @@ export function extractionMessage(data, extracted, matched) {
     : '';
   const pp = data.extractMeta?.pdfPages;
   const pages = pp
-    ? `PDF: ${pp.mode === 'all' ? 'all pages' : 'first 2 + last 2'}${pp.read ? ` (${pp.read}/${pp.total ?? '?'} read)` : ''}`
+    ? pp.mode === 'text'
+      ? `PDF text read from all ${pp.total ?? ''} page(s)`
+      : `Scanned PDF, OCR on ${pp.mode === 'all' ? 'all pages' : 'first 2 + last 2'}${pp.read ? ` (${pp.read}/${pp.total ?? '?'} read)` : ''}`
     : '';
   const source = data.extractMeta?.source ? `via ${data.extractMeta.source}` : '';
   return [match, [pages, source].filter(Boolean).join(' · ')].filter(Boolean).join(' — ');

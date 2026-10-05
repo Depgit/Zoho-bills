@@ -1,20 +1,16 @@
 import Icon from './Icon.jsx';
 
-// Info / success message strip. Messages starting with ✓ get a check icon.
-export default function InfoBanner({ message, onClose, style }) {
+// Info / success message strip. Messages starting with ✓ show as success.
+export default function InfoBanner({ message, onClose }) {
   if (!message) return null;
   const success = message.startsWith('✓');
   return (
-    <div className="extracted-banner" style={{ marginBottom: '1.5rem', ...style }}>
-      <Icon name={success ? 'checkCircle' : 'alertCircle'} size={20} style={success ? { color: 'var(--success)' } : undefined} />
+    <div className={`notice ${success ? 'notice-success' : ''}`} role="status">
+      <Icon name={success ? 'checkCircle' : 'alertCircle'} size={16} />
       <span>{message}</span>
       {onClose && (
-        <button
-          type="button"
-          onClick={onClose}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', marginLeft: 'auto', fontWeight: 'bold' }}
-        >
-          ✕
+        <button type="button" className="notice-close" onClick={onClose} aria-label="Dismiss">
+          ×
         </button>
       )}
     </div>

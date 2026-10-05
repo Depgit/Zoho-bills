@@ -1,21 +1,12 @@
-// The role's tab bar (Upload / Queue / History / Users)
+// The role's tabs (Upload / Queue / History / Users)
 export default function RoleTabs({ tabs, active, onSelect }) {
   return (
-    <div
-      style={{
-        background: 'var(--color-surface-subtle, #f8fafc)',
-        borderBottom: '1px solid var(--color-border)',
-        padding: '0.5rem 2rem',
-        display: 'flex',
-        gap: '0.5rem',
-        flexWrap: 'wrap',
-      }}
-    >
+    <nav className="tabs" aria-label="Sections">
       {tabs.map(([key, label]) => (
-        <button key={key} className={`btn btn-sm ${active === key ? 'btn-primary' : 'btn-secondary'}`} onClick={() => onSelect(key)}>
+        <button key={key} type="button" className={`tab ${active === key ? 'active' : ''}`} aria-current={active === key ? 'page' : undefined} onClick={() => onSelect(key)}>
           {label}
         </button>
       ))}
-    </div>
+    </nav>
   );
 }

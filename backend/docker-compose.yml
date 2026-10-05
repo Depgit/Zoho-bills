@@ -1,0 +1,23 @@
+# Local PostgreSQL for development: docker compose up -d
+# Port 5433 on the host (5432 is often taken by another local Postgres).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zoho-bills-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zoho
+      POSTGRES_PASSWORD: zoho
+      POSTGRES_DB: zoho_bills
+    ports:
+      - '5433:5432'
+    volumes:
+      - zoho-bills-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U zoho -d zoho_bills']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  zoho-bills-pg:

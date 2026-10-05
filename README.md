@@ -1,14 +1,17 @@
-# Zoho Bill Approvals (MERN)
+# Zoho Bill Approvals
+
+React + Vite frontend, Node + Express backend, PostgreSQL (Drizzle), bill files in Supabase Storage.
 
 Flow: uploader (PM/CM/OM/FM) uploads a bill -> OCR + AI extraction -> form pre-filled -> approval chain
 PM -> CM -> OM -> FM -> bill posted to Zoho Books (+ file attached). An FM's own upload posts straight away.
 Rejected bills keep their file so the owner can fix and resubmit. Full backend details: [backend/README.md](backend/README.md).
 
 ## Run
-    cd backend && cp .env.example .env   # fill values
-    npm i && npm run seed && npm start
+    cd backend && cp .env.example .env   # fill values (DATABASE_URL, JWT_SECRET, AI keys, storage)
+    npm i && npm run db:up && npm start   # Postgres in Docker on 5433; migrations run on start
     cd ../frontend && npm i && npm run dev   # http://localhost:5173
-Seed users (password123): pm@example.com, l1@example.com, fin@example.com
+Register the organisation in the app (it creates the Admin), then the Admin creates FM → OM → CM → PM users.
+Moving existing MongoDB data: see "Moving from MongoDB" in [backend/README.md](backend/README.md).
 
 ## Zoho setup (India DC)
 1. https://api-console.zoho.in -> Self Client. Scopes:
@@ -18,20 +21,24 @@ Seed users (password123): pm@example.com, l1@example.com, fin@example.com
 
 ## Project layout
 
+Every outside dependency has one folder, so replacing it touches only that folder.
+
 ```
-backend/src/       see backend/README.md -> Files
+backend/src/       see backend/README.md -> Files (db/, storage/, integrations/, security/, services/, http/)
 frontend/src/
   main.jsx, App.jsx    entry; login/register until signed in, then AppShell
-  api/                 axios client (JWT header) + error -> popup event
+  api/                 the ONLY place that calls the server: client (JWT header), errors (→ popup), auth, bills, admin, zoho
+  styles/              all CSS: tokens (colours, spacing), base, layout, controls, tables, feedback, one file per page area
   constants/           roles, tabs per role
-  utils/               pure helpers: bill maths, tax, dates, format, session...
-  hooks/               useApiList, useBillDocument
-  components/common/   reusable UI: Icon, SearchSelect, ErrorModal, Modal, StatusBadge, Spinner...
-  components/layout/   Navbar, RoleTabs, WelcomeBanner, AppShell
+  utils/               pure helpers: bill maths, tax, dates, format, session, team…
+  hooks/               useRemote (cancellable loads), useUrlState (filters in the URL), useDebounced, useApiList, useBillDocument
+  components/common/   reusable UI: Icon, SearchSelect, Modal, StatusBadge, Pagination, SortHeader, FilterChips…
+  components/layout/   Navbar, RoleTabs, banners, AppShell
   pages/auth/          LoginPage, RegisterOrgPage and their steps
-  pages/upload/        BillFormPage: upload card, bill editor, line items, allocations, my bills
-  pages/review/        ReviewPage: queue list, bill inspector, tax decision, approve/reject
-  pages/history/       HistoryPage: filters, KPIs, bills table, preview/delete modals
+  pages/upload/        BillFormPage: upload card, bill editor, line items, allocations, my bills (paged)
+  pages/review/        ReviewPage: searchable paged queue, bill inspector, tax decision, approve/reject
+  pages/history/       HistoryPage: stat tiles, filter bar (team / property / stage / dates / amount), chips, sortable paged table
   pages/admin/         AdminPage: users table, create user, transfer workload
 ```
-One component or one job per file; page-specific pieces live next to their page.
+Lists are filtered, sorted and paged by the server, so they stay fast as bills grow; filters live in the URL.
+Tables turn into cards on phones.

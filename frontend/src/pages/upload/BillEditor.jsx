@@ -54,7 +54,7 @@ export default function BillEditor({ role, form, setForm, data, vendor, myLocati
 
       <LocationField value={form.location_id} locations={data.locations} myLocationId={myLocationId} onChange={(v) => set('location_id', v)} />
 
-      {role !== 'PM' && <PmAllocationsEditor allocations={form.allocations} pms={data.assignablePms} total={total} setForm={setForm} />}
+      {role !== 'PM' && <PmAllocationsEditor allocations={form.allocations} mode={form.allocationMode} pms={data.assignablePms} total={total} setForm={setForm} />}
 
       <div className="line-items-actions">
         <TotalsSummary subtotal={subtotal} discount={discount} total={total} ocrTotal={form.extracted.total} />

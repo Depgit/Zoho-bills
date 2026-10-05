@@ -1,40 +1,46 @@
-// Bill files (PDF/images) stored in MongoDB GridFS — survives restarts/redeploys,
-// unlike the local disk on Render. Bill.pdfFile holds the GridFS file id (hex string).
-import mongoose from 'mongoose';
-import fs from 'fs';
+// Bill files: bytes in file storage (src/storage), a record in the database (src/db).
+// Bill.pdfFile holds the file id.
+import crypto from 'crypto';
+import fs from 'fs/promises';
+import { Readable } from 'stream';
+import { filesRepo } from '../db/index.js';
+import { getObject, putObject, removeObject } from '../storage/index.js';
 
-const bucket = () => new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'billFiles' });
-const oid = (id) => (mongoose.isObjectIdOrHexString(id) ? new mongoose.Types.ObjectId(id) : null);
+// Store a local (temp) upload; returns the new file id
+export async function saveFile(localPath, filename, mimeType) {
+  const id = crypto.randomUUID();
+  const storageKey = `bills/${id}`;
+  const buffer = await fs.readFile(localPath);
+  await putObject(storageKey, buffer, mimeType);
+  await filesRepo.create({ id, storageKey, filename: filename || '', mimeType: mimeType || 'application/pdf', size: buffer.length });
+  return id;
+}
 
-// Copy a local (temp) file into GridFS, return its id
-export const saveFile = (localPath, filename, contentType) =>
-  new Promise((resolve, reject) => {
-    const upload = bucket().openUploadStream(filename, { metadata: { contentType } });
-    fs.createReadStream(localPath)
-      .pipe(upload)
-      .on('error', reject)
-      .on('finish', () => resolve(String(upload.id)));
-  });
+export const fileExists = async (id) => Boolean(await filesRepo.findById(id));
 
-export const fileExists = async (id) => !!oid(id) && !!(await bucket().find({ _id: oid(id) }).limit(1).next());
+export async function readFile(id) {
+  const f = await filesRepo.findById(id);
+  if (!f) throw new Error('File not found');
+  return getObject(f.storageKey);
+}
 
-export const streamFile = (id) => bucket().openDownloadStream(oid(id));
+export const streamFile = async (id) => Readable.from(await readFile(id));
 
-export const readFile = (id) =>
-  new Promise((resolve, reject) => {
-    const chunks = [];
-    streamFile(id)
-      .on('data', (c) => chunks.push(c))
-      .on('error', reject)
-      .on('end', () => resolve(Buffer.concat(chunks)));
-  });
+// Never throws — a missing file is already "deleted"
+export async function deleteFile(id) {
+  try {
+    const f = await filesRepo.findById(id);
+    if (!f) return;
+    await removeObject(f.storageKey);
+    await filesRepo.remove(id);
+  } catch (e) {
+    console.warn('Could not delete file', id, e.message);
+  }
+}
 
-export const deleteFile = (id) => oid(id) && bucket().delete(oid(id)).catch(() => {});
-
-// Files older than `ms` that no bill uses (uploaded via /extract but never saved)
-export const orphanFiles = async (ms, isUsed) => {
-  const out = [];
-  const old = bucket().find({ uploadDate: { $lt: new Date(Date.now() - ms) } }, { projection: { _id: 1 } });
-  for await (const f of old) if (!(await isUsed(String(f._id)))) out.push(String(f._id));
-  return out;
-};
+// Delete uploads older than `ms` that no bill uses; returns how many
+export async function deleteOrphanFiles(ms) {
+  const orphans = await filesRepo.orphans(ms);
+  for (const f of orphans) await deleteFile(f.id);
+  return orphans.length;
+}
