@@ -41,5 +41,8 @@ export async function billFile(req, res) {
   file.stream.on('error', () => res.end()).pipe(res);
 }
 
+// POST /bills/approve-many { ids, comment? } → { results: [{ id, billNumber, ok, status, stage, error }] }
+export const approveMany = async (req, res) => res.json({ results: await bills.approveMany(req.user, req.body.ids, (req.body.comment || '').trim()) });
+
 export const decide = async (req, res) =>
   res.json(presentBill(await bills.decide(req.user, req.params.id, req.params.act, req.body)));

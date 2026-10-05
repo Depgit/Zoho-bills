@@ -28,7 +28,17 @@ export function normalise(raw) {
     discount_percent: num(r.discount_percent),
     total: num(r.total),
     line_items: Array.isArray(r.line_items)
-      ? r.line_items.map((it) => ({ name: it?.name || '', quantity: num(it?.quantity), rate: num(it?.rate) }))
+      ? r.line_items
+          .map((it) => ({
+            name: String(it?.name || '').trim(),
+            description: String(it?.description || '').trim(),
+            hsn: String(it?.hsn || '').trim(),
+            quantity: num(it?.quantity),
+            rate: num(it?.rate),
+            // the row's own GST %, else the invoice's (null when neither is known)
+            tax_percent: it?.tax_percent !== undefined && it?.tax_percent !== '' && it?.tax_percent !== null ? num(it.tax_percent) : null,
+          }))
+          .filter((it) => it.name || it.rate)
       : [],
   };
 }

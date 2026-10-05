@@ -23,5 +23,6 @@ router.post('/', uploaders, asyncHandler(bills.createBill));
 router.put('/:id', uploaders, asyncHandler(bills.updateBill));
 router.delete('/:id', auth(), asyncHandler(bills.deleteBill));
 router.get('/:id/pdf', auth(), asyncHandler(bills.billFile));
+router.post('/approve-many', auth(...APPROVER_ROLES, 'ADMIN'), asyncHandler(bills.approveMany));
 router.post('/:id/:act(approve|reject)', auth(...APPROVER_ROLES, 'ADMIN'), asyncHandler(bills.decide));
 export default router;

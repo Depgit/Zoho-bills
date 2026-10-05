@@ -29,7 +29,7 @@ export async function extractUpload(orgId, file, pages) {
   }
 
   try {
-    const { data, source, pdfPages, ocrText } = await extracting;
+    const { data, source, pdfPages, ocrText, lineItems, aiErrors } = await extracting;
     // Vendor memory: fields users keep correcting the same way
     const hints = await learn.getVendorHints(orgId, {
       gstins: [data?.gstin, ...(data?.gstins || [])],
@@ -43,7 +43,7 @@ export async function extractUpload(orgId, file, pages) {
       pdfFile,
       fileType: file.mimetype,
       extracted: learn.applyVendorHints(data, hints),
-      extractMeta: { source, pdfPages, ...(Object.keys(hints).length ? { hints } : {}) },
+      extractMeta: { source, pdfPages, lineItems, aiErrors, ...(Object.keys(hints).length ? { hints } : {}) },
     };
   } catch (e) {
     return { pdfFile, fileType: file.mimetype, extracted: {}, warning: e.message };

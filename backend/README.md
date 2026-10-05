@@ -161,6 +161,7 @@ All routes except register and login need `Authorization: Bearer <jwt>`.
   - `sort=field:asc|desc` (date, amount, billNumber, vendor, status, updated), `page`, `pageSize` (10, 25, 50, 100).
   - `all=1`: every bill of the scope in one response `{ rows, total, truncated }` (up to 10,000, newest first) — what the app uses; it filters in the browser. Responses are gzip-compressed.
 - `GET /:id/pdf`: the bill's file, if I can see the bill.
+- `POST /approve-many { ids, comment? }` (CM, OM, FM, ADMIN): approve up to 100 bills at once without opening them. Each bill is approved on its own (at FM: tax slabs picked automatically, posted to Zoho); returns `{ results: [{ id, billNumber, ok, status, stage, error }] }` — a bill not waiting on you, or one Zoho rejects, is reported and the rest still go through.
 - `POST /:id/approve | /:id/reject`: only the approver the bill waits on, or the Admin. Rejecting needs a `comment`. At FM, `lineItems[].tax_id` can override the tax slabs.
 - `GET/POST /vendor-account-map`: remembers the uploader's default expense account for each vendor.
 
@@ -181,8 +182,18 @@ All routes except register and login need `Authorization: Bearer <jwt>`.
    - **Image:** Tesseract.
    - Poppler: `brew install poppler` (Mac) / `apt-get install poppler-utils`; the `Dockerfile` installs it. Without it everything still works through pdf.js. `PDFTOTEXT_PATH` points at a non-standard binary.
 3. **Regex:** picks out GSTIN, invoice number, date, tax % and total.
-4. **AI:** Gemini, DeepSeek and Groq get the text in parallel. The **first usable result wins** and the others aren't waited for. If every AI fails, the regex result is used.
-5. **Single line:** the PM form turns all extracted items into one line, with rate = the sum of qty × rate before tax.
+   **Table parser (no AI)** — `services/extraction/tableParser.js`: on `pdftotext` text the line-item table is read by
+   column position: the header row is found on every page, each row's pieces go to the nearest column, wrapped
+   descriptions / numbers ("18,000." + "00") are joined, a Discount column gives the net rate (Amount ÷ Qty), extra
+   columns (e.g. Property Name / Code) go into the line description, and HSN/SAC is picked up. The rows must add up
+   to the printed Sub Total. **Table + GSTIN + invoice no + total found → no AI is called at all** (`source: 'pdftotext'`).
+4. **AI** (only when the text / regex / table aren't enough): Gemini, DeepSeek and Groq get the text in parallel; the **first usable result wins**. A parsed table still replaces the AI's line items.
+   - Gemini retries when busy (2 s, 6 s), then tries `GEMINI_FALLBACK_MODEL` (default `gemini-flash-lite-latest`); its answer can be long enough for 100+ rows.
+   - Groq / DeepSeek skip documents bigger than their limit (`GROQ_MAX_INPUT_TOKENS` 7500 — Groq's free tier is ~8000 tokens/minute; `DEEPSEEK_MAX_INPUT_TOKENS` 60000).
+   - If every AI fails, the regex result is used (`source: 'regex'`) and the upload message lists why each AI failed.
+5. **Line items:** the AI returns every table row with its HSN, quantity, rate (before tax) and **its own tax %** (rows can differ, e.g. 18% and 0%).
+   - PDF read from its text (pdftotext / pdf.js): the form gets **one line per row**.
+   - Scans and photos (OCR): the rows are combined into one line (rate = Σ qty × rate), since OCR'd tables aren't reliable row by row.
 
 ### Learning from corrections (`services/learning/`)
 

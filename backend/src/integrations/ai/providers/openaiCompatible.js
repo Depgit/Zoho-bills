@@ -1,8 +1,16 @@
 // DeepSeek and Groq: both speak the OpenAI chat-completions API
-import { DEEPSEEK_MODEL, GROQ_MODEL } from '../config.js';
+import { DEEPSEEK_MAX_INPUT_TOKENS, DEEPSEEK_MODEL, GROQ_MAX_INPUT_TOKENS, GROQ_MODEL } from '../config.js';
 import { extractJson, SYSTEM_PROMPT, textPrompt } from '../prompt.js';
 
-async function chatJson(name, url, apiKey, model, ocrText, regexFields, examples) {
+// Rough token count (≈ 3.5 characters per token for this kind of text)
+const tokensIn = (text) => Math.ceil(text.length / 3.5);
+
+async function chatJson(name, url, apiKey, model, ocrText, regexFields, examples, maxInputTokens) {
+  const prompt = textPrompt(ocrText, regexFields, examples);
+  const estimate = tokensIn(SYSTEM_PROMPT + prompt);
+  if (estimate > maxInputTokens) {
+    throw Object.assign(new Error(`${name} skipped: document too large (~${estimate} tokens, limit ${maxInputTokens})`), { status: 'skipped' });
+  }
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -10,7 +18,7 @@ async function chatJson(name, url, apiKey, model, ocrText, regexFields, examples
       model,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: textPrompt(ocrText, regexFields, examples) },
+        { role: 'user', content: prompt },
       ],
       response_format: { type: 'json_object' },
       max_tokens: 8000,
@@ -35,6 +43,7 @@ export const viaDeepSeek = (ocrText, regexFields, examples) =>
     ocrText,
     regexFields,
     examples,
+    DEEPSEEK_MAX_INPUT_TOKENS,
   );
 
 export const viaGroq = (ocrText, regexFields, examples) =>
@@ -46,4 +55,5 @@ export const viaGroq = (ocrText, regexFields, examples) =>
     ocrText,
     regexFields,
     examples,
+    GROQ_MAX_INPUT_TOKENS,
   );

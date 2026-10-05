@@ -2,6 +2,10 @@ import { idOf } from './ids.js';
 
 export const lineAmount = (l) => (Number(l.rate) || 0) * (Number(l.quantity) || 1);
 
+// A line's tax and its total including tax
+export const lineTax = (l) => (lineAmount(l) * (Number(l.tax_percentage) || 0)) / 100;
+export const lineTotal = (l) => lineAmount(l) + lineTax(l);
+
 // Subtotal, discount (flat amount, else % of subtotal) and total = subtotal + tax − discount
 export function billTotals(b) {
   const items = b?.lineItems || [];

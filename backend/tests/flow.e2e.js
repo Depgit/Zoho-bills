@@ -185,6 +185,19 @@ ok('second run removes nothing', (await removeStaleRejectedFiles(10)) === 0);
 await call(PM3, 'DELETE', `/api/bills/${newRej.id}`);
 await call(ADMIN, 'DELETE', `/api/bills/${oldRej.id}`);
 
+// ── bulk approve ───────────────────────────────────────────────────────────
+const m1 = (await call(PM1, 'POST', '/api/bills', await bill({ billNumber: 'BULK-1' }))).j;
+const m2 = (await call(PM2, 'POST', '/api/bills', await bill({ billNumber: 'BULK-2' }))).j;
+const m3 = (await call(PM3, 'POST', '/api/bills', await bill({ billNumber: 'BULK-3' }))).j; // waits on CM2, not CM1
+r = await call(CM1, 'POST', '/api/bills/approve-many', { ids: [m1.id, m2.id, m3.id, 'nope'] });
+const res = Object.fromEntries(r.j.results.map((x) => [x.billNumber || x.id, x]));
+ok('bulk approve: own queue moves on', res['BULK-1'].ok && res['BULK-1'].stage === 'OM' && res['BULK-2'].ok);
+ok('bulk approve: others reported, not approved', !res['BULK-3'].ok && /not waiting on you/.test(res['BULK-3'].error) && !res.nope.ok);
+ok('bulk approve: history says APPROVED', (await list(ADMIN, '?scope=history&q=BULK-1')).rows[0].history.at(-1).action === 'APPROVED');
+ok('bulk approve: PM not allowed', (await call(PM1, 'POST', '/api/bills/approve-many', { ids: [m1.id] })).st === 403);
+ok('bulk approve: empty list → 400', (await call(CM1, 'POST', '/api/bills/approve-many', { ids: [] })).st === 400);
+for (const b of [m1, m2, m3]) await call(ADMIN, 'DELETE', `/api/bills/${b.id}`);
+
 // ── admin ──────────────────────────────────────────────────────────────────
 ok('cannot delete FM1 with work', (await call(ADMIN, 'DELETE', `/api/admin/users/${FM1.id}`)).st === 409);
 ok('cannot transfer FM → OM', (await call(ADMIN, 'POST', `/api/admin/users/${FM1.id}/transfer`, { toUserId: OM2.id })).st === 400);

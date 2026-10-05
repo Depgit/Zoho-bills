@@ -7,7 +7,7 @@ import { MANAGER_ROLE, ROLE_NAME } from '../../constants/roles.js';
 import { isEditable } from '../../utils/billStatus.js';
 import { currentUser } from '../../utils/session.js';
 import { matchVendor } from '../../utils/vendorMatch.js';
-import { extractedLines, extractionMessage, formFromBill, formFromExtraction } from './billForm.js';
+import { extractedLines, extractionMessage, formFromBill, formFromExtraction, readFromPdfText } from './billForm.js';
 import { useBillFormData } from './useBillFormData.js';
 import { useBillDocument } from '../../hooks/useBillDocument.js';
 import { useFilePreview } from '../../hooks/useFilePreview.js';
@@ -32,6 +32,23 @@ export default function BillFormPage({ role = 'PM', initialEditBill, onClearInit
   const [message, setMessage] = useState('');
   const [extracting, setExtracting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // The file preview can be hidden for a wider form (remembered on this device)
+  const [previewHidden, setPreviewHidden] = useState(() => {
+    try {
+      return localStorage.getItem('filePreviewHidden') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const togglePreview = () =>
+    setPreviewHidden((hidden) => {
+      try {
+        localStorage.setItem('filePreviewHidden', hidden ? '0' : '1');
+      } catch {
+        /* ignore */
+      }
+      return !hidden;
+    });
   // What the user is looking at: the file just picked on this device, else (editing) the bill's stored file
   const [localPreview, showLocalFile, clearLocalFile] = useFilePreview();
   const stored = useBillDocument(editingId && !localPreview && form?.pdfFile ? { id: editingId, fileType: form.fileType } : null);
@@ -101,7 +118,8 @@ export default function BillFormPage({ role = 'PM', initialEditBill, onClearInit
       // Clear the search box when nothing matched, so garbage OCR text doesn't empty the dropdown
       setVendorQuery(matched?.contact_name || '');
       const vendorId = matched?.contact_id || '';
-      const lines = vendorId ? data.applyVendorAccount(vendorId, extractedLines(extracted)) : extractedLines(extracted);
+      const rows = extractedLines(extracted, { allItems: readFromPdfText(res) });
+      const lines = vendorId ? data.applyVendorAccount(vendorId, rows) : rows;
       setForm(formFromExtraction(res, file, extracted, vendorId, lines, me.location_id));
       setEditingId(null);
       setMessage(extractionMessage(res, extracted, matched));
@@ -197,7 +215,7 @@ export default function BillFormPage({ role = 'PM', initialEditBill, onClearInit
       <UploadCard extracting={extracting} onFile={upload} replacing={Boolean(editingId && form)} />
 
       {(form || (extracting && localPreview)) && (
-        <div className="editor-layout">
+        <div className={`editor-layout ${previewHidden ? 'preview-hidden' : ''}`}>
           <div className="editor-main">
             {form ? (
               <BillEditor
@@ -217,7 +235,12 @@ export default function BillFormPage({ role = 'PM', initialEditBill, onClearInit
               </div>
             )}
           </div>
-          <FilePreviewPanel preview={preview} loading={stored.url === null && Boolean(editingId && form?.pdfFile && !localPreview)} />
+          <FilePreviewPanel
+            preview={preview}
+            loading={stored.url === null && Boolean(editingId && form?.pdfFile && !localPreview)}
+            hidden={previewHidden}
+            onToggle={togglePreview}
+          />
         </div>
       )}
 

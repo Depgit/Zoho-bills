@@ -40,7 +40,24 @@ export const formFromExtraction = (data, file, extracted, vendorId, lineItems, d
   location_id: defaultLocationId || '', // preselected from the profile; can be changed
 });
 
-export const extractedLines = (x) => [collapsedLine(x)];
+// One form line per invoice row when the PDF was read from its own text (pdftotext / pdf.js) —
+// the table is exact then. Scans and photos (OCR) keep the single collapsed line: OCR'd tables
+// are too unreliable to trust row by row.
+export function extractedLines(x, { allItems = false } = {}) {
+  const items = (x.line_items || []).filter((it) => it.name || Number(it.rate) > 0);
+  if (!allItems || items.length < 2) return [collapsedLine(x)];
+  return items.map((it) => ({
+    ...BLANK_LINE,
+    name: it.name || '',
+    description: [it.hsn ? `HSN/SAC ${it.hsn}` : '', it.description || ''].filter(Boolean).join(' · '),
+    quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1,
+    rate: Number(it.rate) > 0 ? Math.round(Number(it.rate) * 100) / 100 : '',
+    tax_percentage: numberOr(it.tax_percent, numberOr(x.tax_percent, 0)),
+  }));
+}
+
+// Was this extraction read from the PDF's own text? (then every row can be trusted)
+export const readFromPdfText = (res) => res?.extractMeta?.pdfPages?.mode === 'text' || Boolean(res?.extractMeta?.lineItems?.used);
 
 // Edit form from an existing bill
 export const formFromBill = (b, taxes, defaultLocationId) => ({
@@ -79,11 +96,17 @@ export function extractionMessage(data, extracted, matched) {
   const pp = data.extractMeta?.pdfPages;
   const pages = pp
     ? pp.mode === 'text'
-      ? `PDF text read from all ${pp.total ?? ''} page(s)`
+      ? `PDF text read from all ${pp.total ?? ''} page(s)${extracted.line_items?.length > 1 ? `, ${extracted.line_items.length} line items` : ''}`
       : `Scanned PDF, OCR on ${pp.mode === 'all' ? 'all pages' : 'first 2 + last 2'}${pp.read ? ` (${pp.read}/${pp.total ?? '?'} read)` : ''}`
     : '';
-  const source = data.extractMeta?.source ? `via ${data.extractMeta.source}` : '';
-  return [match, [pages, source].filter(Boolean).join(' · ')].filter(Boolean).join(' — ');
+  const meta = data.extractMeta || {};
+  const li = meta.lineItems;
+  const table = li?.used ? `${li.rows} line item(s) read from the PDF table${li.matchesSubtotal ? ' — they add up to the Sub Total ✓' : ''}` : '';
+  const source = meta.source === 'pdftotext' ? 'no AI needed' : meta.source && meta.source !== 'regex' ? `via ${meta.source}` : '';
+  const aiFailed = meta.aiErrors && Object.keys(meta.aiErrors).length
+    ? `⚠️ AI could not read this bill (${Object.entries(meta.aiErrors).map(([k, v]) => `${k}: ${v}`).join(', ')}) — check every field`
+    : '';
+  return [aiFailed, match, [pages, table, source].filter(Boolean).join(' · ')].filter(Boolean).join(' — ');
 }
 
 // Tax % choices: standard slabs + Zoho's + whatever was extracted

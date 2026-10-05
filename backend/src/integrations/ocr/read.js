@@ -2,7 +2,8 @@
 //   PDF with a text layer → all pages, read directly (pdftotext -layout, else pdf.js) — fast, exact
 //   scanned PDF          → Tesseract on the first 2 + last 2 pages (or every page with scannedPages: 'all')
 //   image                → Tesseract
-// → { text, method: 'pdftotext' | 'pdfjs' | 'tesseract', pages: { read, total } | undefined }
+// → { text, method: 'pdftotext' | 'pdfjs' | 'tesseract', pages: { read, total } | undefined,
+//     layout: the untouched pdftotext output (exact column positions — for the table parser) }
 import { DEBUG_OCR } from '../../config/env.js';
 import { ocrImage, ocrPdfPages } from './ocr.js';
 import { trimPdf, wholePdf } from './pdf.js';
@@ -33,7 +34,7 @@ export async function readDocument(filePath, mimeType, { scannedPages = 'trim' }
     const layer = await pdfTextLayer(filePath);
     if (layer.text) {
       const { total } = await wholePdf(filePath);
-      result = { text: layer.text, method: layer.method, pages: { read: total, total } };
+      result = { text: layer.text, method: layer.method, pages: { read: total, total }, ...(layer.method === 'pdftotext' ? { layout: layer.text } : {}) };
     } else {
       const chosen = scannedPages === 'all' ? await wholePdf(filePath) : await trimPdf(filePath, 2, 2);
       result = { text: await ocrPdfPages(chosen.bytes), method: 'tesseract', pages: { read: chosen.kept, total: chosen.total } };

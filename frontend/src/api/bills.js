@@ -19,6 +19,8 @@ export const extractBill = async (formData) => (await api.post('/bills/extract',
 export const saveBill = async (id, body) => changed((id ? await api.put(`/bills/${id}`, body) : await api.post('/bills', body)).data);
 export const deleteBill = async (id) => changed(await api.delete(`/bills/${id}`));
 export const decideBill = async (id, action, body) => changed((await api.post(`/bills/${id}/${action}`, body)).data);
+// Approve many at once → [{ id, billNumber, ok, status, stage, error }]
+export const approveMany = async (ids, comment = '') => changed((await api.post('/bills/approve-many', { ids, comment })).data.results);
 export const billFile = async (id) => (await api.get(`/bills/${id}/pdf`, { responseType: 'blob' })).data;
 
 export const vendorAccounts = ({ force } = {}) => cached('vendor-accounts', async () => (await api.get('/bills/vendor-account-map')).data, { force });

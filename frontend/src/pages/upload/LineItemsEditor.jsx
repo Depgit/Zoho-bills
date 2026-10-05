@@ -41,6 +41,7 @@ export default function LineItemsEditor({ form, setForm, set, accounts, taxRates
           <div>Rate (₹)</div>
           <div>Expense Account</div>
           <div>Tax %</div>
+          <div className="num">Amount</div>
           <div></div>
         </div>
         {lines.map((line, i) => (

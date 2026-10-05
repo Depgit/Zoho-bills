@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { decideBill } from '../../api/bills.js';
+import { approveMany, decideBill } from '../../api/bills.js';
 import { showError } from '../../api/errors.js';
 import { taxes as loadTaxes } from '../../api/zoho.js';
 import InfoBanner from '../../components/common/InfoBanner.jsx';
@@ -12,6 +12,8 @@ import { makeFilter, paginate, sortBills } from '../../utils/billQuery.js';
 import { autoSlabs, needsSlab } from '../../utils/tax.js';
 import QueueList from './QueueList.jsx';
 import BillInspector from './BillInspector.jsx';
+import BulkApproveBar from './BulkApproveBar.jsx';
+import { bulkResultMessage } from './bulkResult.js';
 import NoBillSelected from './NoBillSelected.jsx';
 
 const description = (role) => {
@@ -28,6 +30,8 @@ export default function ReviewPage({ role }) {
   const [message, setMessage] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
+  const [checked, setChecked] = useState(() => new Set()); // bills ticked for bulk approval
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [taxes] = useApiList(loadTaxes, { quiet: true });
   // The whole queue is cached; search and paging happen in the browser (oldest waiting first)
   const queue = useBills('queue');
@@ -35,6 +39,47 @@ export default function ReviewPage({ role }) {
     () => paginate(sortBills(queue.rows.filter(makeFilter({ q: search }, {})), 'updated:asc'), page, 25),
     [queue.rows, search, page],
   );
+  // Ticks only count for bills still in the queue
+  const ticked = queue.rows.filter((b) => checked.has(b.id));
+  const toggle = (id) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const pageIds = shown.rows.map((b) => b.id);
+  const allOnPage = pageIds.length > 0 && pageIds.every((id) => checked.has(id));
+  const togglePage = () =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      pageIds.forEach((id) => (allOnPage ? next.delete(id) : next.add(id)));
+      return next;
+    });
+
+  const approveTicked = async () => {
+    const atFM = ticked.filter((b) => b.stage === 'FM').length;
+    const ok = window.confirm(
+      `Approve ${ticked.length} bill(s) without opening them?` +
+        (atFM ? `\n\n${atFM} of them are at the Finance stage and will be posted to Zoho Books with the tax slabs picked automatically.` : ''),
+    );
+    if (!ok) return;
+    setBulkBusy(true);
+    setMessage(`Approving ${ticked.length} bill(s)…`);
+    try {
+      const results = await approveMany(ticked.map((b) => b.id));
+      setChecked(new Set(results.filter((r) => !r.ok).map((r) => r.id))); // keep the failed ones ticked
+      if (selected && results.some((r) => r.ok && r.id === selected.id)) setSelected(null);
+      const { text, failed } = bulkResultMessage(results);
+      setMessage(failed ? '' : text);
+      if (failed) showError(text);
+    } catch (e) {
+      setMessage('');
+      showError(e);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const onSearch = (v) => {
     setSearch(v);
     setPage(1);
@@ -75,7 +120,8 @@ export default function ReviewPage({ role }) {
       <PageHeader title={isAdmin ? 'All pending approvals' : `${ROLE_NAME[role]} approvals`} description={description(role)}>
         <RefreshButton onClick={queue.refresh} loading={queue.loading} label="Refresh" />
       </PageHeader>
-      <InfoBanner message={message} />
+      <InfoBanner message={message} onClose={() => setMessage('')} />
+      <BulkApproveBar count={ticked.length} busy={bulkBusy} onApprove={approveTicked} onClear={() => setChecked(new Set())} />
 
       <div className="review-layout">
         <QueueList
@@ -88,6 +134,10 @@ export default function ReviewPage({ role }) {
           selectedId={selected?.id}
           showApprover={isAdmin}
           onOpen={open}
+          checked={checked}
+          onToggle={toggle}
+          allOnPage={allOnPage}
+          onTogglePage={togglePage}
         />
         {selected ? <BillInspector bill={selected} taxes={taxes} onSlabChange={changeSlab} onDecide={decide} /> : <NoBillSelected />}
       </div>

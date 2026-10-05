@@ -100,3 +100,24 @@ export async function decide(user, id, act, body) {
   b.history.push(historyEntry(actor, action, comment));
   return billsRepo.save(b);
 }
+
+const BULK_LIMIT = 100;
+
+// Approve many bills in one go (approvers who already checked them). Each bill is approved on its
+// own — one failing (e.g. Zoho rejects it at FM) doesn't stop the others. → [{ id, billNumber, ok, status, stage, error }]
+export async function approveMany(user, ids, comment = '') {
+  const list = [...new Set(Array.isArray(ids) ? ids : [])];
+  if (!list.length) throw httpError(400, 'Pick at least one bill to approve');
+  if (list.length > BULK_LIMIT) throw httpError(400, `Approve at most ${BULK_LIMIT} bills at a time`);
+  const results = [];
+  for (const id of list) {
+    try {
+      const b = await decide(user, id, 'approve', { comment });
+      results.push({ id, billNumber: b.billNumber, ok: true, status: b.status, stage: b.stage });
+    } catch (e) {
+      const b = await billsRepo.findById(id).catch(() => null);
+      results.push({ id, billNumber: b?.billNumber || '', ok: false, error: e.message });
+    }
+  }
+  return results;
+}
