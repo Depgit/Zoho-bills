@@ -6,16 +6,22 @@ export const lineAmount = (l) => (Number(l.rate) || 0) * (Number(l.quantity) || 
 export const lineTax = (l) => (lineAmount(l) * (Number(l.tax_percentage) || 0)) / 100;
 export const lineTotal = (l) => lineAmount(l) + lineTax(l);
 
-// Subtotal, discount (flat amount, else % of subtotal) and total = subtotal + tax − discount
+// Discount rows [{ description, type: 'amount' | 'percent', value }] — older bills: their single discount
+export function discountRows(b) {
+  if (Array.isArray(b?.discounts)) return b.discounts;
+  if (Number(b?.discount_amount) > 0) return [{ description: 'Discount', type: 'amount', value: Number(b.discount_amount) }];
+  if (Number(b?.discount_percent) > 0) return [{ description: 'Discount', type: 'percent', value: Number(b.discount_percent) }];
+  return [];
+}
+
+// A discount row's ₹ amount (a % is of the subtotal)
+export const discountAmount = (d, subtotal) => (d.type === 'percent' ? (subtotal * (Number(d.value) || 0)) / 100 : Number(d.value) || 0);
+
+// Subtotal, discounts and total = subtotal + tax − Σ discounts (discounts are taken after tax)
 export function billTotals(b) {
   const items = b?.lineItems || [];
   const subtotal = items.reduce((s, l) => s + lineAmount(l), 0);
-  const discount =
-    Number(b?.discount_amount) > 0
-      ? Number(b.discount_amount)
-      : Number(b?.discount_percent) > 0
-        ? (subtotal * Number(b.discount_percent)) / 100
-        : 0;
+  const discount = discountRows(b).reduce((s, d) => s + discountAmount(d, subtotal), 0);
   const withTax = items.reduce((s, l) => s + lineAmount(l) * (1 + (Number(l.tax_percentage) || 0) / 100), 0);
   return { subtotal, discount, total: withTax - discount };
 }
@@ -47,3 +53,9 @@ export const isEqualSplit = (amounts, total) => {
   const equal = splitEqually(total, amounts.length);
   return amounts.every((a, i) => Math.abs((Number(a) || 0) - equal[i]) < 0.01);
 };
+
+// The expense account discounts are booked to by default: "Purchase Discount" (else any "Discount" account)
+export function defaultDiscountAccount(accounts = []) {
+  const named = (re) => accounts.find((a) => re.test(String(a.account_name || '').trim()));
+  return (named(/^purchase\s*discounts?$/i) || named(/purchase\s*discount/i) || named(/^discounts?$/i) || named(/discount/i))?.account_id || '';
+}

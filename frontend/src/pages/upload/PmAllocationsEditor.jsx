@@ -1,11 +1,13 @@
 import { useEffect } from 'react';
-import SearchSelect from '../../components/common/SearchSelect.jsx';
+import MultiSelect from '../../components/common/MultiSelect.jsx';
 import { splitEqually } from '../../utils/billMath.js';
 import { inr } from '../../utils/format.js';
+import { fillAllocations } from './allocations.js';
 
 // CM / OM / FM uploads: which PM(s) the bill belongs to, and how much each.
-// By default the total is shared equally between the chosen PMs (and re-shared when the total or
-// the PMs change). Typing an amount switches to manual amounts; "Split equally" switches back.
+// PMs are picked in one checklist (search, Select all, Clear). By default the total is shared equally
+// between them (and re-shared when the total or the PMs change). Typing an amount switches to manual
+// amounts; "Split equally" switches back.
 export default function PmAllocationsEditor({ allocations = [], mode = 'equal', pms, total, setForm }) {
   const allocated = allocations.reduce((s, a) => s + (Number(a.amount) || 0), 0);
   const remaining = Math.round((total - allocated) * 100) / 100;
@@ -18,21 +20,32 @@ export default function PmAllocationsEditor({ allocations = [], mode = 'equal', 
     return list.map((a, i) => ({ ...a, amount: shares[i] }));
   };
 
-  // Equal mode: keep the shares in step with the total and the number of PMs
+  // Keep the amounts in step with the total and the number of PMs:
+  //   one PM → always the whole total (in any mode);  equal mode → equal shares
   const key = `${total}:${allocations.length}`;
   useEffect(() => {
-    if (!equal || !allocations.length) return;
+    if (!allocations.length) return;
+    const round = Math.round(total * 100) / 100;
+    if (allocations.length === 1) {
+      if (Number(allocations[0].amount) !== round) update((list) => [{ ...list[0], amount: round }]);
+      return;
+    }
+    if (!equal) return;
     const shares = splitEqually(total, allocations.length);
     if (allocations.some((a, i) => Number(a.amount) !== shares[i])) update(shareEqually);
   }, [equal, key]);
 
-  const changePm = (i, pmId) => update((list) => list.map((a, j) => (j === i ? { ...a, pmId } : a)));
+  const fill = (list) => fillAllocations(list, total, equal);
+
+  // The checklist changed: keep the amounts of PMs still chosen, add the new ones (equal mode re-shares)
+  const choose = (ids) =>
+    update((list) => {
+      const byPm = new Map(list.map((a) => [a.pmId, a]));
+      return fill(ids.map((pmId) => byPm.get(pmId) || { pmId, amount: '' }));
+    });
+  const nameOf = (pmId) => pms.find((p) => p.id === pmId);
   const changeAmount = (i, amount) => update((list) => list.map((a, j) => (j === i ? { ...a, amount } : a)), { allocationMode: 'manual' });
-  const add = () => update((list) => (equal ? shareEqually([...list, { pmId: '' }]) : [...list, { pmId: '', amount: remaining > 0 ? remaining : '' }]));
-  const remove = (i) => update((list) => {
-    const rest = list.filter((_, j) => j !== i);
-    return equal ? shareEqually(rest) : rest;
-  });
+  const remove = (i) => update((list) => fill(list.filter((_, j) => j !== i)));
   const backToEqual = () => update(shareEqually, { allocationMode: 'equal' });
 
   return (
@@ -55,37 +68,38 @@ export default function PmAllocationsEditor({ allocations = [], mode = 'equal', 
 
       {pms.length === 0 && <p className="alloc-hint text-danger">No Property Managers are in your reporting line yet — ask the Admin to set up the hierarchy.</p>}
 
-      {allocations.map((a, i) => (
-        <div key={i} className="alloc-row">
-          <SearchSelect style={{ flex: '1 1 220px' }} value={a.pmId} onChange={(e) => changePm(i, e.target.value)}>
-            <option value="">— Property Manager —</option>
-            {pms
-              .filter((p) => p.id === a.pmId || !allocations.some((x) => x.pmId === p.id))
-              .map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                  {p.location_name ? ` · ${p.location_name}` : ''}
-                </option>
-              ))}
-          </SearchSelect>
-          <input
-            className="form-control alloc-amount"
-            type="number"
-            min="0"
-            step="0.01"
-            placeholder="Amount ₹"
-            value={a.amount ?? ''}
-            onChange={(e) => changeAmount(i, e.target.value)}
-          />
-          <button type="button" className="icon-btn danger" onClick={() => remove(i)} title="Remove">
-            ✕
-          </button>
-        </div>
-      ))}
+      <MultiSelect
+        options={pms.map((p) => ({ value: p.id, label: p.name, sub: p.location_name }))}
+        value={allocations.map((a) => a.pmId).filter(Boolean)}
+        onChange={choose}
+        placeholder="Choose Property Managers…"
+        disabled={pms.length === 0}
+      />
 
-      <button type="button" className="btn btn-secondary btn-sm" onClick={add} disabled={pms.length === 0 || allocations.length >= pms.length}>
-        + Add Property Manager
-      </button>
+      {allocations.length > 0 && (
+        <div className="alloc-list">
+          {allocations.map((a, i) => (
+            <div key={a.pmId || i} className="alloc-row">
+              <span className="alloc-name">
+                <b>{nameOf(a.pmId)?.name || 'Unknown PM'}</b>
+                {nameOf(a.pmId)?.location_name && <span className="muted"> · {nameOf(a.pmId).location_name}</span>}
+              </span>
+              <input
+                className="form-control alloc-amount"
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="Amount ₹"
+                value={a.amount ?? ''}
+                onChange={(e) => changeAmount(i, e.target.value)}
+              />
+              <button type="button" className="icon-btn danger" onClick={() => remove(i)} title="Remove">
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

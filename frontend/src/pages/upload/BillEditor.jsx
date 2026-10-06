@@ -48,7 +48,7 @@ export default function BillEditor({ role, form, setForm, data, vendor, myLocati
         set={set}
         accounts={data.accounts}
         taxRates={taxRateOptions(data.taxes, form.extracted)}
-        discount={discount}
+        subtotal={subtotal}
         onAccountPicked={(accountId) => data.rememberVendorAccount(form.vendorId, accountId)}
       />
 

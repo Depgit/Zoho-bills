@@ -27,6 +27,10 @@ export function normalise(raw) {
     discount_amount: num(r.discount_amount),
     discount_percent: num(r.discount_percent),
     total: num(r.total),
+    // deductions printed under the Sub Total (become discount rows)
+    discounts: Array.isArray(r.discounts)
+      ? r.discounts.map((d) => ({ description: String(d?.description || '').trim(), amount: num(d?.amount) })).filter((d) => d.amount > 0)
+      : [],
     line_items: Array.isArray(r.line_items)
       ? r.line_items
           .map((it) => ({

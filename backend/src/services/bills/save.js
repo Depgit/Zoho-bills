@@ -3,7 +3,8 @@
 import { checkSubmittable } from './validation.js';
 import { resolveAllocations } from './allocations.js';
 import { resolveBillLocation } from './location.js';
-import { billTotal } from './total.js';
+import { billSubtotal, billTotal } from './total.js';
+import { cleanDiscounts, discountTotal } from './discounts.js';
 import { startChain } from './workflow.js';
 
 // Fields copied from the form as-is (location / allocations are resolved separately)
@@ -23,6 +24,12 @@ const pickFormFields = (body) => Object.fromEntries(FORM_FIELDS.filter((k) => k 
 
 export async function saveBill(b, body, owner) {
   Object.assign(b, pickFormFields(body));
+  // Discount rows; discount_amount keeps their ₹ total (what Zoho gets)
+  if ('discounts' in body) {
+    b.discounts = cleanDiscounts(body.discounts);
+    b.discount_amount = discountTotal(b, billSubtotal(b));
+    b.discount_percent = 0;
+  }
   Object.assign(b, await resolveBillLocation(owner, body.location_id || b.location_id));
   const submitting = !body.draft;
   b.total = billTotal(b);

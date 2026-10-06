@@ -10,7 +10,8 @@ function Item({ label, children }) {
 
 export default function ExtractedSummary({ extracted: x }) {
   const hasTax = x.tax_percent !== undefined && x.tax_percent !== null;
-  const hasDiscount = x.discount_amount > 0 || x.discount_percent > 0;
+  const deductions = (x.discounts || []).reduce((s, d) => s + (Number(d.amount) || 0), 0);
+  const hasDiscount = deductions > 0 || x.discount_amount > 0 || x.discount_percent > 0;
   return (
     <div className="extracted-banner">
       <div className="extracted-meta-group">
@@ -35,7 +36,7 @@ export default function ExtractedSummary({ extracted: x }) {
         {hasDiscount && (
           <Item label="OCR Discount:">
             <span className="extracted-item-val" style={{ color: 'var(--warning, #f59e0b)' }}>
-              {x.discount_amount > 0 ? `₹${x.discount_amount}` : `${x.discount_percent}%`}
+              {deductions > 0 ? `₹${deductions}` : x.discount_amount > 0 ? `₹${x.discount_amount}` : `${x.discount_percent}%`}
             </span>
           </Item>
         )}

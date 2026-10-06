@@ -13,6 +13,7 @@ export function validateBillForm(form, { assigns, draft }) {
   if (!form.vendorId || !form.billNumber || !form.date) return 'Please fill in Vendor, Bill Number and Date.';
   const badRate = form.lineItems.findIndex((l) => !(Number(l.rate) > 0));
   if (badRate >= 0) return `Line item ${badRate + 1}: Rate (₹) must be greater than 0.`;
+  if (billTotals(form).total < 0) return 'The discounts are larger than the bill — check the discount rows.';
   if (assigns) {
     const { total } = billTotals(form);
     const remaining = remainingToAllocate(form.allocations, total);

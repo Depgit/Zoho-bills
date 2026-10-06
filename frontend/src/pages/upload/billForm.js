@@ -1,5 +1,5 @@
 // Building the bill form state from an extraction or from an existing bill
-import { isEqualSplit } from '../../utils/billMath.js';
+import { discountRows, isEqualSplit } from '../../utils/billMath.js';
 import { idOf } from '../../utils/ids.js';
 
 export const BLANK_LINE = { name: '', description: '', quantity: 1, rate: '', account_id: '', tax_percentage: 0, tax_id: '' };
@@ -22,6 +22,14 @@ function collapsedLine(x) {
   };
 }
 
+// Discount rows from the extraction: deductions printed under the Sub Total, else the invoice's discount
+function extractedDiscounts(x) {
+  if (x.discounts?.length) return x.discounts.map((d) => ({ description: d.description || 'Deduction', type: 'amount', value: d.amount }));
+  if (Number(x.discount_amount) > 0) return [{ description: 'Discount', type: 'amount', value: Number(x.discount_amount) }];
+  if (Number(x.discount_percent) > 0) return [{ description: 'Discount', type: 'percent', value: Number(x.discount_percent) }];
+  return [];
+}
+
 // New form from POST /bills/extract
 export const formFromExtraction = (data, file, extracted, vendorId, lineItems, defaultLocationId) => ({
   pdfFile: data.pdfFile,
@@ -31,8 +39,7 @@ export const formFromExtraction = (data, file, extracted, vendorId, lineItems, d
   billNumber: extracted.invoice_no || '',
   date: extracted.date || '',
   dueDate: '',
-  discount_amount: extracted.discount_amount || 0,
-  discount_percent: extracted.discount_percent || 0,
+  discounts: extractedDiscounts(extracted),
   lineItems,
   accountPicked: false,
   allocations: [],
@@ -68,8 +75,7 @@ export const formFromBill = (b, taxes, defaultLocationId) => ({
   billNumber: b.billNumber || '',
   date: b.date || '',
   dueDate: b.dueDate || '',
-  discount_amount: b.discount_amount || 0,
-  discount_percent: b.discount_percent || 0,
+  discounts: discountRows(b).map((d) => ({ ...d })),
   lineItems: (b.lineItems?.length ? b.lineItems : [BLANK_LINE]).map((l) => ({
     ...BLANK_LINE,
     ...l,

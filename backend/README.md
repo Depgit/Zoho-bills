@@ -238,8 +238,10 @@ No model training. Each extraction is logged, then compared with what the PM act
 - **States:**
   - `source_of_supply` = the vendor's state.
   - `destination_of_supply` = the property's state.
-- **Discount:**
-  - It's a percentage of the subtotal (or a flat amount), taken off **after** tax: total = subtotal + tax − discount.
+- **Discounts:**
+  - A bill has a list of discount rows (`discounts: [{ description, type: 'amount' | 'percent', value }]`), each a flat ₹ amount or a % of the subtotal, all taken off **after** tax: total = subtotal + tax − Σ discounts. `discount_amount` holds their ₹ total. Bills from before the rows existed show their single discount as one row.
+  - From a text PDF, deductions printed under the Sub Total ("Amount Withheld (-) 7,602.00", "Less: …") become discount rows automatically (`services/extraction/deductions.js`).
+  - Zoho gets the rows' sum as one bill discount; the rows are listed in the Zoho bill's notes ("Discounts: Amount Withheld ₹7602.00; …").
   - It's sent with `is_discount_before_tax: false` and `discount_type: entity_level`.
   - `discount_account_id` is the Zoho account named "Discount". That account must exist in Zoho.
 - **The file:** it's attached in Zoho after the bill is created. If attaching fails, the bill is still POSTED and `zohoError` is set.

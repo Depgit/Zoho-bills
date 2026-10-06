@@ -23,6 +23,7 @@ import { parseOcr } from './parseOcr.js';
 import { fillGaps, isUseful, normalise } from './normalise.js';
 import { timer } from './timing.js';
 import { parseLineItems } from './tableParser.js';
+import { parseDeductions } from './deductions.js';
 
 // What counts as a usable AI answer
 const judge = (raw) => {
@@ -31,7 +32,7 @@ const judge = (raw) => {
 };
 
 // Bump when the AI's answer shape changes, so older cached answers aren't reused
-const CACHE_VERSION = 'v3'; // v3: line items from the pdftotext table
+const CACHE_VERSION = 'v4'; // v4: line items from the pdftotext table + deductions
 
 const inFlight = new Map(); // cache key → Promise, so identical uploads share one call
 
@@ -110,7 +111,7 @@ async function run(file, mimeType, { isPdf, allPages, ns, cacheKey, fewShot, bas
 
   // Everything found without AI (clean text PDF) → done, no AI call
   if (tableOk && regex.gstin && regex.invoice_no && regex.total) {
-    const data = normalise({ ...regex, vendor_name: guessVendorName(ocr), line_items: table.items });
+    const data = normalise({ ...regex, vendor_name: guessVendorName(ocr), line_items: table.items, discounts: parseDeductions(doc.layout) });
     t.log('pdftotext table — no AI');
     return finish(data, 'pdftotext', withText, { cacheKey, ns });
   }
@@ -140,6 +141,7 @@ async function run(file, mimeType, { isPdf, allPages, ns, cacheKey, fewShot, bas
   }
   // The parsed table beats the AI's reading of it
   if (tableOk) data.line_items = normalise({ line_items: table.items }).line_items;
+  if (doc.layout && !data.discounts.length) data.discounts = normalise({ discounts: parseDeductions(doc.layout) }).discounts;
   if (source === 'failed') return { data, source, duplicate: false, ...withText };
   return finish(data, source, withText, { cacheKey, ns });
 }

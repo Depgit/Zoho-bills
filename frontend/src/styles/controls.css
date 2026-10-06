@@ -208,3 +208,72 @@ select.form-control,
   height: 15px;
   accent-color: var(--primary);
 }
+
+/* Multi-select checklist */
+.multi {
+  position: relative;
+  min-width: 0;
+}
+.multi-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.multi-toggle span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.multi-panel {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  min-width: 260px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.multi-search {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.multi-search > svg {
+  left: 18px;
+}
+.multi-actions {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+}
+.multi-list {
+  max-height: 260px;
+  overflow-y: auto;
+}
+.multi-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.multi-option:hover {
+  background: var(--surface-2);
+}
+.multi-option.on {
+  background: var(--primary-soft);
+}
+.multi-option input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--primary);
+}

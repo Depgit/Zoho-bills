@@ -4,17 +4,18 @@ import FormData from 'form-data';
 import { gstinState, stateCode } from '../../services/gst.service.js';
 import { zohoRequest } from './request.js';
 
-// Zoho books a bill-level discount into an account — use the org's account named "Discount"
+// Zoho books a bill-level discount into one account: the one picked on the bill (b.discount_account_id),
+// else the org's "Purchase Discount" account, else one named "Discount"
 const discountAccountCache = {};
 async function discountAccount(org) {
   const key = String(org.id);
   if (!discountAccountCache[key]) {
     const res = await zohoRequest(org, 'get', '/chartofaccounts', { params: { per_page: 200 } });
     const list = res.chartofaccounts || [];
-    const account =
-      list.find((a) => /^discount$/i.test(a.account_name.trim())) || list.find((a) => /discount/i.test(a.account_name));
+    const named = (re) => list.find((a) => re.test(String(a.account_name || '').trim()));
+    const account = named(/^purchase\s*discounts?$/i) || named(/purchase\s*discount/i) || named(/^discounts?$/i) || named(/discount/i);
     if (!account) {
-      throw new Error('No discount account found — create an account named "Discount" in Zoho Books (Chart of Accounts)');
+      throw new Error('No discount account found — create an account named "Purchase Discount" in Zoho Books (Chart of Accounts)');
     }
     discountAccountCache[key] = account.account_id;
   }
@@ -38,6 +39,7 @@ export async function createBill(org, b) {
       bill_number: b.billNumber,
       date: b.date,
       due_date: b.dueDate,
+      ...(b.notes ? { notes: String(b.notes).slice(0, 2000) } : {}),
       ...(source ? { source_of_supply: source } : {}),
       ...(destination ? { destination_of_supply: destination } : {}),
       ...(b.location_id ? { location_id: b.location_id } : {}),
@@ -46,7 +48,7 @@ export async function createBill(org, b) {
             discount,
             is_discount_before_tax: false,
             discount_type: 'entity_level',
-            discount_account_id: await discountAccount(org),
+            discount_account_id: b.discount_account_id || (await discountAccount(org)),
           }
         : {}),
       line_items: b.lineItems.map((l) => ({

@@ -1,10 +1,13 @@
-// Bill total as shown in the form: subtotal + tax − discount (discount is taken after tax)
+// Bill total as shown in the form: subtotal + tax − discounts (discounts are taken after tax)
+import { discountTotal } from './discounts.js';
+
+const lineAmount = (l) => (Number(l.rate) || 0) * (Number(l.quantity) || 1);
+
+export const billSubtotal = (b) => (b.lineItems || []).reduce((s, l) => s + lineAmount(l), 0);
+
 export function billTotal(b) {
   const items = b.lineItems || [];
-  const lineAmount = (l) => (Number(l.rate) || 0) * (Number(l.quantity) || 1);
-  const subtotal = items.reduce((s, l) => s + lineAmount(l), 0);
+  const subtotal = billSubtotal(b);
   const tax = items.reduce((s, l) => s + (lineAmount(l) * (Number(l.tax_percentage) || 0)) / 100, 0);
-  const discount =
-    Number(b.discount_amount) > 0 ? Number(b.discount_amount) : (subtotal * (Number(b.discount_percent) || 0)) / 100;
-  return Math.round((subtotal + tax - discount) * 100) / 100;
+  return Math.round((subtotal + tax - discountTotal(b, subtotal)) * 100) / 100;
 }

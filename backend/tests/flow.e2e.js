@@ -185,6 +185,19 @@ ok('second run removes nothing', (await removeStaleRejectedFiles(10)) === 0);
 await call(PM3, 'DELETE', `/api/bills/${newRej.id}`);
 await call(ADMIN, 'DELETE', `/api/bills/${oldRej.id}`);
 
+// ── discount rows ─────────────────────────────────────────────────────────
+r = await call(PM1, 'POST', '/api/bills', await bill({
+  billNumber: 'DISC-1', draft: true,
+  lineItems: [{ name: 'x', quantity: 1, rate: 10000, account_id: 'a', tax_percentage: 18 }],
+  discounts: [{ description: 'Amount Withheld', type: 'amount', value: 200, account_id: 'pd1' }, { description: 'Early pay', type: 'percent', value: 5, account_id: 'pd1' }, { description: 'empty', type: 'amount', value: 0 }],
+}));
+ok('discount rows saved (empty ones dropped)', r.j.discounts.length === 2 && r.j.discounts[1].type === 'percent');
+ok('discount rows keep their account', r.j.discounts.every((d) => d.account_id === 'pd1'));
+ok('total = subtotal + tax − all discount rows', r.j.total === 10000 + 1800 - 200 - 500 && r.j.discount_amount === 700);
+await pool.query("update bills set discounts = '[]', discount_amount = 0, discount_percent = 10 where id = $1", [r.j.id]);
+ok('old single discount shows as one row', (await list(PM1, '?scope=mine&q=DISC-1')).rows[0].discounts[0].type === 'percent');
+await call(PM1, 'DELETE', `/api/bills/${r.j.id}`);
+
 // ── bulk approve ───────────────────────────────────────────────────────────
 const m1 = (await call(PM1, 'POST', '/api/bills', await bill({ billNumber: 'BULK-1' }))).j;
 const m2 = (await call(PM2, 'POST', '/api/bills', await bill({ billNumber: 'BULK-2' }))).j;

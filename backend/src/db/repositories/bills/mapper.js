@@ -4,6 +4,14 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const dateOrNull = (v) => (DATE.test(String(v || '')) ? String(v) : null);
 const num = (v, fallback = 0) => (Number.isFinite(Number(v)) && v !== '' && v !== null ? Number(v) : fallback);
 
+// Bills saved before discount rows existed: their single discount as one row
+const legacyDiscounts = (r) =>
+  r.discountAmount > 0
+    ? [{ description: 'Discount', type: 'amount', value: r.discountAmount }]
+    : r.discountPercent > 0
+      ? [{ description: 'Discount', type: 'percent', value: r.discountPercent }]
+      : [];
+
 export const toBill = (r, { lineItems = [], allocations = [], history = [], people = new Map() } = {}) => ({
   id: r.id,
   financeOrgId: r.financeOrgId,
@@ -17,6 +25,7 @@ export const toBill = (r, { lineItems = [], allocations = [], history = [], peop
   dueDate: r.dueDate || '',
   discount_amount: r.discountAmount,
   discount_percent: r.discountPercent,
+  discounts: Array.isArray(r.discounts) && r.discounts.length ? r.discounts : legacyDiscounts(r),
   location_id: r.locationId,
   location_name: r.locationName,
   source_of_supply: r.sourceOfSupply,
@@ -69,6 +78,7 @@ export const toBillRow = (b) => ({
   dueDate: dateOrNull(b.dueDate),
   discountAmount: num(b.discount_amount),
   discountPercent: num(b.discount_percent),
+  discounts: Array.isArray(b.discounts) ? b.discounts : [],
   locationId: b.location_id || '',
   locationName: b.location_name || '',
   sourceOfSupply: b.source_of_supply || '',

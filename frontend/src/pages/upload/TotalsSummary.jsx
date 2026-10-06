@@ -9,7 +9,7 @@ export default function TotalsSummary({ subtotal, discount, total, ocrTotal }) {
       <div>
         <span className="computation-label">Subtotal (before discount):</span>
         <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>{inr(subtotal)}</div>
-        {discount > 0 && <div style={{ fontSize: '0.8125rem', color: 'var(--success, #22c55e)' }}>− {inr(discount)} discount</div>}
+        {discount > 0 && <div style={{ fontSize: '0.8125rem', color: 'var(--success, #22c55e)' }}>− {inr(discount)} discounts &amp; deductions</div>}
         <span className="computation-label" style={{ marginTop: '0.25rem', display: 'block' }}>
           Calculated Total (incl. taxes):
         </span>

@@ -1,10 +1,10 @@
 import { BLANK_LINE } from './billForm.js';
-import DiscountRow from './DiscountRow.jsx';
+import DiscountsEditor from './DiscountsEditor.jsx';
 import LineItemRow from './LineItemRow.jsx';
 
-// Bill lines + discount. The first expense account picked on a bill is copied to the other
+// Bill lines + discount rows. The first expense account picked on a bill is copied to the other
 // lines that were empty or had the same auto-filled account; later picks change only that line.
-export default function LineItemsEditor({ form, setForm, set, accounts, taxRates, discount, onAccountPicked }) {
+export default function LineItemsEditor({ form, setForm, set, accounts, taxRates, subtotal, onAccountPicked }) {
   const lines = form.lineItems;
 
   const changeLine = (i, key, value) => {
@@ -56,7 +56,7 @@ export default function LineItemsEditor({ form, setForm, set, accounts, taxRates
         ))}
       </div>
 
-      <DiscountRow form={form} set={set} discount={discount} />
+      <DiscountsEditor rows={form.discounts || []} subtotal={subtotal} accounts={accounts} onChange={(rows) => set('discounts', rows)} />
     </div>
   );
 }

@@ -26,6 +26,8 @@ export const bills = pgTable(
     dueDate: date('due_date', { mode: 'string' }),
     discountAmount: money('discount_amount').notNull().default(0),
     discountPercent: decimal('discount_percent').notNull().default(0),
+    // Discount rows [{ description, type: 'amount' | 'percent', value }]; discount_amount = their ₹ total
+    discounts: jsonb('discounts').notNull().default([]),
     // Location picked on the form; its state decides GST vs IGST
     locationId: text('location_id').notNull().default(''),
     locationName: text('location_name').notNull().default(''),

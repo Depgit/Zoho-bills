@@ -7,6 +7,8 @@ import { httpError } from '../../utils/httpError.js';
 import { deleteFile, readFile } from '../files.service.js';
 import { taxPlan } from '../gst.service.js';
 import { vendorGstinOf } from '../vendors/index.js';
+import { discountAccountOf, discountNote, discountTotal } from './discounts.js';
+import { billSubtotal } from './total.js';
 
 function applyTaxSlabs(b, taxes, slabOverrides) {
   (Array.isArray(slabOverrides) ? slabOverrides : []).forEach((o, i) => {
@@ -36,7 +38,16 @@ export async function postToZoho(b, slabOverrides) {
   applyTaxSlabs(b, await zoho.taxes(org).catch(() => []), slabOverrides);
 
   try {
-    b.zohoBillId = await zoho.createBill(org, b);
+    // Zoho takes one bill-level discount: the rows' total; the rows themselves go into the notes
+    const subtotal = billSubtotal(b);
+    const note = discountNote(b, subtotal);
+    b.zohoBillId = await zoho.createBill(org, {
+      ...b,
+      discount_amount: discountTotal(b, subtotal),
+      discount_percent: 0,
+      discount_account_id: discountAccountOf(b),
+      ...(note ? { notes: `Discounts: ${note}` } : {}),
+    });
   } catch (e) {
     throw httpError(502, 'Zoho: ' + (e.response?.data?.message || e.message));
   }

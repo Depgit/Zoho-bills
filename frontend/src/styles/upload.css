@@ -345,3 +345,75 @@
   -webkit-appearance: none;
   margin: 0;
 }
+
+/* Discount rows — laid out like the bill lines */
+.discounts {
+  margin-top: 14px;
+}
+.discounts-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.discounts-head .form-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.discount-row {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.6fr) 140px minmax(110px, 0.7fr) minmax(190px, 1.3fr) minmax(112px, 0.8fr) 36px;
+  min-width: 880px;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+}
+.discount-row + .discount-row {
+  border-top: 1px solid var(--border);
+}
+.discount-header {
+  background: var(--surface-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-2);
+}
+.discount-amount b {
+  color: var(--success);
+}
+.discount-total {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.discount-row input[type='number']::-webkit-inner-spin-button,
+.discount-row input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+@media (max-width: 860px) {
+  .discount-header {
+    display: none;
+  }
+  .discount-row {
+    grid-template-columns: 1fr 1fr;
+    min-width: 0;
+  }
+  .discount-row > :first-child {
+    grid-column: 1 / -1;
+  }
+}
+.alloc-list {
+  margin-top: 10px;
+}
+.alloc-name {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
